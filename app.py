@@ -6,6 +6,13 @@ import ast
 from datetime import datetime, timedelta
 from users import check_login, create_user_page, get_mongo_client, register_user, login_user
 
+# Import agentic intelligence features (optional - won't break if file doesn't exist)
+try:
+    from agentic_intelligence import get_quick_insight, get_proactive_notification
+    AGENTIC_FEATURES_AVAILABLE = True
+except ImportError:
+    AGENTIC_FEATURES_AVAILABLE = False
+
 # ======================================================================================
 # API Configuration and Database Setup
 # ======================================================================================
@@ -142,88 +149,258 @@ def main_app():
         target_user_id = "Diya" if st.session_state.app_mode == "Diya's Moods" else st.session_state.current_user
         
         st.markdown("---")
-        
-        with st.expander("Period Tracker & Insights", expanded=True):
-            with st.container(border=True):
-                # Proactive messaging section
-                st.header("Agent's Proactive Insights")
-                today = datetime.now().date()
-                client = get_mongo_client()
-                db = client["food_agent_db"]
-                period_tracker_collection = db["period_tracker"]
-                tracker_data = period_tracker_collection.find_one({"user_id": "Diya"})
-                
-                if tracker_data:
-                    last_period_date_value = tracker_data.get('last_period_date')
-                    if isinstance(last_period_date_value, datetime):
-                        last_period_date_value = last_period_date_value.date()
-                    else:
-                        last_period_date_value = datetime.now().date() - timedelta(days=28)
-                    cycle_length_value = tracker_data.get('cycle_length', 28)
-                    
-                    days_since_last_period = (today - last_period_date_value).days
-                    days_to_next_period = cycle_length_value - days_since_last_period
 
-                    if days_to_next_period <= 2 and days_to_next_period > 0:
-                        st.warning("Hey Diya, your agent knows your period is around the corner. It's okay to feel a bit moody! We've got you covered.")
-                    elif days_to_next_period <= cycle_length_value and days_to_next_period >= cycle_length_value - 4: # Assuming a 5-day period
-                        st.info("Hey Diya, we know you're on your period, so we have some personalized suggestions to help with the cravings!")
-                        if st.button("Get a 'Period is killing' suggestion now!", use_container_width=True):
-                            st.session_state.proactive_prediction_trigger = True
-                            st.session_state.last_period_date = today
-                            st.rerun()
+        # Period Tracker - Expandable Container
+        with st.expander("📅 Period Tracker", expanded=False):
+            st.markdown("Your agent will use this to proactively suggest meals when your cravings might begin.")
+            
+            client = get_mongo_client()
+            db = client["food_agent_db"]
+            period_tracker_collection = db["period_tracker"]
+            tracker_data = period_tracker_collection.find_one({"user_id": "Diya"})
 
-                st.markdown("---")
-
-                st.header("Period Tracker")
-                st.markdown("Your agent will use this to proactively suggest meals when your cravings might begin.")
-                
-                client = get_mongo_client()
-                db = client["food_agent_db"]
-                period_tracker_collection = db["period_tracker"]
-                tracker_data = period_tracker_collection.find_one({"user_id": "Diya"})
-
-                if tracker_data:
-                    last_period_date_value = tracker_data.get('last_period_date')
-                    if isinstance(last_period_date_value, datetime):
-                        last_period_date_value = last_period_date_value.date()
-                    else:
-                        last_period_date_value = datetime.now().date() - timedelta(days=28)
-                    cycle_length_value = tracker_data.get('cycle_length', 28)
+            if tracker_data:
+                last_period_date_value = tracker_data.get('last_period_date')
+                if isinstance(last_period_date_value, datetime):
+                    last_period_date_value = last_period_date_value.date()
                 else:
                     last_period_date_value = datetime.now().date() - timedelta(days=28)
-                    cycle_length_value = 28
+                cycle_length_value = tracker_data.get('cycle_length', 28)
+            else:
+                last_period_date_value = datetime.now().date() - timedelta(days=28)
+                cycle_length_value = 28
 
-                last_period_date = st.date_input("Last Period Start Date", value=last_period_date_value)
-                cycle_length = st.number_input("Average Cycle Length (days)", min_value=1, value=cycle_length_value)
+            last_period_date = st.date_input("Last Period Start Date", value=last_period_date_value)
+            cycle_length = st.number_input("Average Cycle Length (days)", min_value=1, value=cycle_length_value, key="cycle_length_input")
 
-                if st.button("Save Tracker Data", use_container_width=True):
-                    data_to_save = {
-                        "user_id": "Diya",
-                        "last_period_date": datetime.combine(last_period_date, datetime.min.time()),
-                        "cycle_length": cycle_length
-                    }
-                    period_tracker_collection.update_one(
-                        {"user_id": "Diya"},
-                        {"$set": data_to_save},
-                        upsert=True
+            if st.button("Save Tracker Data", use_container_width=True, key="save_tracker_button"):
+                data_to_save = {
+                    "user_id": "Diya",
+                    "last_period_date": datetime.combine(last_period_date, datetime.min.time()),
+                    "cycle_length": cycle_length
+                }
+                period_tracker_collection.update_one(
+                    {"user_id": "Diya"},
+                    {"$set": data_to_save},
+                    upsert=True
+                )
+                st.success("Period tracker data saved successfully!")
+                st.rerun()
+
+            today = datetime.now().date()
+            next_period_start = last_period_date + timedelta(days=cycle_length)
+            
+            st.markdown("---")
+            st.markdown("**Your Agent's Predictions:**")
+            
+            predicted_dates = [next_period_start + timedelta(days=i * cycle_length) for i in range(5)]
+            for i, date in enumerate(predicted_dates):
+                st.markdown(f"**{i+1}.** {date.strftime('%B %d, %Y')}")
+                
+            st.markdown("---")
+            
+            days_since_last_period = (today - last_period_date).days
+            days_to_next_period = cycle_length - days_since_last_period
+
+            if days_to_next_period <= 2 and days_to_next_period > 0:
+                st.warning("Hey Diya, your agent knows your period is around the corner. It's okay to feel a bit moody! We've got you covered.")
+                if st.button("Get a 'Period is killing' suggestion now!", use_container_width=True, key="proactive_suggestion_button"):
+                    st.session_state.proactive_prediction_trigger = True
+                    st.session_state.prediction_category = "Period is killing"
+                    st.rerun()
+
+            elif days_to_next_period <= cycle_length and days_to_next_period >= cycle_length - 4: # Assuming a 5-day period
+                st.info("Hey Diya, we know you're on your period, so we have some personalized suggestions to help with the cravings!")
+                if st.button("Get a 'Period is killing' suggestion now!", use_container_width=True, key="proactive_suggestion_button"):
+                    st.session_state.proactive_prediction_trigger = True
+                    st.session_state.prediction_category = "Period is killing"
+                    st.rerun()
+        
+        # Meal Planner Agent - Expandable Container
+        with st.expander("🍽️ Meal Planner Agent", expanded=False):
+            st.markdown("Let your agent plan your meals for a few days, based on your cravings and history.")
+            
+            if 'meal_plan' not in st.session_state:
+                num_days = st.number_input("How many days to plan?", min_value=1, max_value=7, value=3, key="num_days_input_sidebar")
+                meal_plan_category = st.selectbox(
+                    "Focus category:",
+                    CATEGORIES[:-1],
+                    key="meal_plan_category_input_sidebar"
+                )
+                
+                if st.button("Generate Meal Plan", use_container_width=True, key="generate_plan_button_sidebar"):
+                    with st.spinner("Your agent is creating your meal plan..."):
+                        history = fetch_history_from_db(target_user_id)
+                        category_history = [item for item in history if item['category'] == meal_plan_category]
+                        
+                        recent_history_str = "\n".join([
+                            f"Food: {item['food']}, Rating: {item['rating']}/10, Comments: {item.get('comments', 'None')}"
+                            for item in category_history[:5]
+                        ])
+
+                        if st.session_state.app_mode == "Diya's Moods":
+                            plan_prompt = f"""
+                            You are a food expert creating a meal plan for a picky vegetarian eater who does not eat eggs. The user wants to plan meals for the next {num_days} days, focusing on the "{meal_plan_category}" category.
+                            
+                            The user's general preferences are:
+                            - Only eats gravies and soups, not whole vegetables (except for onion, capsicum, garlic etc).
+                            - Prefers Jowar, Bajra, and Makai rotis.
+                            - Is on a weightloss journey but not that hardcore.
+                            - For 'Daily choices', focus on Indian and South Indian meals.
+                            - For 'Protein is calling', suggest dishes with tofu, paneer, chhole, or rajma.
+                            - For 'Period is killing', suggest comfort foods.
+                            - For 'Exams', suggest easy and quick comfort meals.
+                            
+                            Here are some of their past choices and comments for this specific category:
+                            {recent_history_str if recent_history_str else "No specific comments for this category yet."}
+                            
+                            Please create a unique meal plan for each of the {num_days} days. Each plan should include a suggested dish and a brief reason why they might like it, mixing insights from their general preferences and their specific comments.
+                            
+                            The response must be a clean, concise JSON array of objects. Each object should have a 'day', 'dish', and 'reason' key.
+                            
+                            Example response:
+                            [
+                              {{"day": "Day 1", "dish": "Dish 1", "reason": "Reason 1"}},
+                              {{"day": "Day 2", "dish": "Dish 2", "reason": "Reason 2"}},
+                              {{"day": "Day 3", "dish": "Dish 3", "reason": "Reason 3"}}
+                            ]
+                            """
+                        else:
+                            plan_prompt = f"""
+                            You are a food expert creating a meal plan for a person who wants to explore new food choices. The user wants to plan meals for the next {num_days} days, focusing on the "{meal_plan_category}" category.
+                            
+                            Here are some of their past choices and comments for this specific category:
+                            {recent_history_str if recent_history_str else "No specific comments for this category yet."}
+                            
+                            Please create a unique meal plan for each of the {num_days} days. Each plan should include a suggested dish and a brief reason why they might like it, referencing their past comments.
+                            
+                            The response must be a clean, concise JSON array of objects. Each object should have a 'day', 'dish', and 'reason' key.
+                            
+                            Example response:
+                            [
+                              {{"day": "Day 1", "dish": "Dish 1", "reason": "Reason 1"}},
+                              {{"day": "Day 2", "dish": "Dish 2", "reason": "Reason 2"}},
+                              {{"day": "Day 3", "dish": "Dish 3", "reason": "Reason 3"}}
+                            ]
+                            """
+
+                        try:
+                            model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
+                            response = model.generate_content(plan_prompt)
+                            
+                            if response and response.text:
+                                raw_text = response.text.strip('`').replace('json', '').strip()
+                                meal_plan = ast.literal_eval(raw_text)
+                                if isinstance(meal_plan, list) and len(meal_plan) == num_days:
+                                    st.session_state['meal_plan'] = meal_plan
+                                    st.session_state['meal_plan_category'] = meal_plan_category
+                                    st.session_state['meal_plan_days'] = num_days
+                                else:
+                                    st.error("The AI agent provided an invalid response format.")
+                            else:
+                                st.error("Sorry, your agent couldn't create a meal plan right now.")
+                        except Exception as e:
+                            st.error(f"An error occurred while creating the meal plan: {e}")
+                    
+                    st.rerun()
+            
+            # Display and rate the generated meal plan within the sidebar container
+            if 'meal_plan' in st.session_state and st.session_state.meal_plan:
+                st.markdown("---")
+                st.markdown("**Generated Meal Plan:**")
+                
+                meal_feedback = []
+                for i, item in enumerate(st.session_state.meal_plan):
+                    st.markdown(f"**{item['day']}:** {item['dish']}")
+                    st.caption(f"Reason: {item['reason']}")
+                    
+                    # Individual rating for each meal
+                    rating = st.select_slider(
+                        f"Rate '{item['dish']}' (1-10):",
+                        options=range(1, 11),
+                        value=5,
+                        key=f"plan_rating_{i}_sidebar"
                     )
-                    st.success("Period tracker data saved successfully!")
+                    comments = st.text_area(
+                        f"Comments for '{item['dish']}' (optional):",
+                        placeholder="e.g., The flavor was good, but it was too spicy.",
+                        key=f"plan_comments_input_{i}_sidebar"
+                    )
+                    
+                    meal_feedback.append({
+                        "dish": item['dish'],
+                        "category": st.session_state.meal_plan_category,
+                        "rating": rating,
+                        "comments": comments,
+                        "reason": item['reason']
+                    })
+                    
+                    st.markdown("---")
+                
+                if st.button("Save Plan", key="save_meal_plan_button_sidebar"):
+                    with st.spinner("Saving meal plan..."):
+                        for feedback in meal_feedback:
+                            data_to_save = {
+                                "user_id": target_user_id,
+                                "category": feedback['category'],
+                                "food": feedback['dish'],
+                                "rating": feedback['rating'],
+                                "comments": f"Meal plan suggestion: {feedback['dish']} | {feedback['comments']}",
+                                "timestamp": time.time()
+                            }
+                            save_to_db(data_to_save)
+                    st.success("Meal plan saved to history!")
+                    del st.session_state.meal_plan
+                    del st.session_state.meal_plan_category
+                    del st.session_state.meal_plan_days
+                    st.rerun()
+
+        # Logout button at the bottom of sidebar
+        # Agentic Intelligence Features - Expandable Container
+        if AGENTIC_FEATURES_AVAILABLE:
+            with st.expander("🤖 Your AI Food Agent", expanded=False):
+                st.markdown("Your agent is learning your patterns and making smart suggestions!")
+                
+                # Get a quick insight
+                insight = get_quick_insight(target_user_id, get_mongo_client())
+                st.info(insight)
+                
+                # Get proactive notification if any
+                notification = get_proactive_notification(target_user_id, get_mongo_client())
+                if notification:
+                    priority_color = {
+                        "high": "🔴",
+                        "medium": "🟡", 
+                        "low": "🟢"
+                    }.get(notification["priority"], "⚪")
+                    
+                    st.markdown(f"{priority_color} **{notification['type'].title()}**: {notification['message']}")
+                    
+                    if notification.get("category"):
+                        if st.button(f"Get {notification['category']} suggestions", 
+                                   key=f"notification_{notification['type']}"):
+                            st.session_state.auto_category = notification['category']
+                            st.rerun()
+                
+                st.markdown("---")
+                st.markdown("**Quick Actions:**")
+                
+                # Quick access to agentic dashboard
+                if st.button("📊 View Full Dashboard", use_container_width=True, key="view_dashboard_sidebar"):
+                    st.session_state.show_agentic_dashboard = True
                     st.rerun()
                 
-                st.markdown("---")
-                st.markdown("**Next Predicted Period Dates:**")
-                
-                predicted_dates = [last_period_date + timedelta(days=i * cycle_length) for i in range(1, 6)]
-                for i, date in enumerate(predicted_dates):
-                    st.markdown(f"**{i+1}.** {date.strftime('%B %d, %Y')}")
-                    
-                st.markdown("---")
-        # Logout button always visible in sidebar
-        if st.button("Logout", use_container_width=True):
+                # Quick pattern check
+                if st.button("🔍 Check My Patterns", use_container_width=True, key="check_patterns_sidebar"):
+                    st.session_state.quick_pattern_check = True
+                    st.rerun()
+        
+        st.markdown("---")
+        if st.button("🚪 Logout", use_container_width=True, key="logout_button"):
             st.session_state.is_authenticated = False
             st.session_state.current_user = None
             st.rerun()
+
 
     # --- Main Content Area ---
     st.title(f"🍽️ Welcome, {st.session_state.current_user}!")
@@ -231,12 +408,26 @@ def main_app():
         st.markdown("Diya's personal palate assistant, built to learn Diyas picky eating habits:")
     else:
         st.markdown("Your personal palate assistant, built to learn your picky eating habits:")
+    st.markdown("---")
 
-    # Handle proactive prediction trigger
-    if 'proactive_prediction_trigger' in st.session_state and st.session_state.proactive_prediction_trigger:
-        with st.spinner("Your agent is thinking..."):
-            history = fetch_history_from_db("Diya")
+    # Handle proactive prediction trigger and auto-category suggestions
+    if ('proactive_prediction_trigger' in st.session_state and st.session_state.proactive_prediction_trigger) or \
+       ('auto_category' in st.session_state and st.session_state.auto_category):
+        
+        # Debug: Show what's in session state
+        if 'auto_category' in st.session_state:
+            st.info(f"Debug: auto_category is set to: {st.session_state.auto_category}")
+        
+        # Determine which category to use
+        if 'auto_category' in st.session_state:
+            prediction_category = st.session_state.auto_category
+            del st.session_state.auto_category  # Clear it after use
+        else:
             prediction_category = "Period is killing"
+        
+        with st.spinner("Your agent is thinking..."):
+            # Use the current target_user_id (could be Diya or the logged-in user)
+            history = fetch_history_from_db(target_user_id)
             
             category_history = [item for item in history if item['category'] == prediction_category]
             
@@ -245,18 +436,26 @@ def main_app():
                 for item in category_history[:5]
             ])
             
-            general_preferences = [
-                "- Only eats gravies and soups, not whole vegetables (except for onion, capsicum, garlic etc).",
-                "- Prefers Jowar, Bajra, and Makai rotis.",
-                "- For 'Daily choices', focus on Indian and South Indian meals.",
-                "- For 'Protein is calling', suggest dishes with tofu, paneer, chhole, or rajma.",
-                "- For 'Period is killing', suggest comfort foods.",
-                "- For 'Exams', suggest easy and quick comfort meals.",
-                "- For 'Desserts' and 'Cheat meals', be creative with the given options."
-            ]
+            # Adjust preferences based on user mode
+            if st.session_state.app_mode == "Diya's Moods":
+                general_preferences = [
+                    "- Only eats gravies and soups, not whole vegetables (except for onion, capsicum, garlic etc).",
+                    "- Prefers Jowar, Bajra, and Makai rotis.",
+                    "- For 'Daily choices', focus on Indian and South Indian meals.",
+                    "- For 'Protein is calling', suggest dishes with tofu, paneer, chhole, or rajma.",
+                    "- For 'Period is killing', suggest comfort foods.",
+                    "- For 'Exams', suggest easy and quick comfort meals.",
+                    "- For 'Desserts' and 'Cheat meals', be creative with the given options."
+                ]
+            else:
+                general_preferences = [
+                    "- User is exploring new food choices and preferences.",
+                    "- Focus on variety and discovery.",
+                    "- Consider past ratings and comments for personalization."
+                ]
             
             prompt = f"""
-            You are a food expert assisting a picky vegetarian eater who does not eat eggs. The user's current eating occasion is "{prediction_category}".
+            You are a food expert assisting a user with their food choices. The user's current eating occasion is "{prediction_category}".
             
             The user's general preferences are:
             {chr(10).join(general_preferences)}
@@ -293,12 +492,73 @@ def main_app():
             except Exception as e:
                 st.error(f"An error occurred while getting the prediction: {e}")
         
-        del st.session_state.proactive_prediction_trigger
+        if 'proactive_prediction_trigger' in st.session_state:
+            del st.session_state.proactive_prediction_trigger
         st.rerun()
+
+
+
 
 
     # ---
     st.divider()
+
+    # Agentic Intelligence Dashboard (conditional display)
+    if AGENTIC_FEATURES_AVAILABLE and st.session_state.get('show_agentic_dashboard', False):
+        st.divider()
+        st.header("🤖 Your AI Food Agent Dashboard")
+        st.markdown("Your agent is learning your patterns and making smart suggestions!")
+        
+        # Import and initialize the agent
+        from agentic_intelligence import initialize_agentic_features, display_agentic_dashboard
+        
+        agent = initialize_agentic_features(target_user_id, get_mongo_client())
+        display_agentic_dashboard(agent)
+        
+        # Add a close button
+        if st.button("❌ Close Dashboard", key="close_dashboard"):
+            del st.session_state.show_agentic_dashboard
+            st.rerun()
+        
+        st.divider()
+    
+    # Quick Pattern Check (conditional display)
+    if AGENTIC_FEATURES_AVAILABLE and st.session_state.get('quick_pattern_check', False):
+        st.divider()
+        st.header("🔍 Your Food Patterns")
+        
+        # Import and initialize the agent for quick check
+        from agentic_intelligence import initialize_agentic_features
+        
+        agent = initialize_agentic_features(target_user_id, get_mongo_client())
+        user_data = agent.get_user_patterns()
+        
+        if user_data["patterns"]:
+            st.subheader("💡 Quick Insights")
+            for insight in user_data["insights"][:3]:  # Show only first 3 insights
+                st.info(insight)
+            
+            # Show category preferences
+            if user_data["patterns"].get("category_preferences"):
+                st.subheader("📊 Category Preferences")
+                for category, data in user_data["patterns"]["category_preferences"].items():
+                    if data["count"] >= 2:  # Only show categories with enough data
+                        avg_rating = data["avg_rating"]
+                        count = data["count"]
+                        st.metric(
+                            label=category,
+                            value=f"{avg_rating:.1f}/10",
+                            delta=f"{count} choices"
+                        )
+        else:
+            st.info("Your agent needs more data to learn your patterns. Start rating your food choices!")
+        
+        # Add a close button
+        if st.button("❌ Close Pattern Check", key="close_pattern_check"):
+            del st.session_state.quick_pattern_check
+            st.rerun()
+        
+        st.divider()
 
     st.header("Log a New Food Choice")
     st.markdown(f"Select an eating occasion and rate the food you chose to help train your agent. You can now enter your own dishes too!")
