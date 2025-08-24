@@ -13,6 +13,13 @@ try:
 except ImportError:
     AGENTIC_FEATURES_AVAILABLE = False
 
+# Import fitness agent features (optional - won't break if file doesn't exist)
+try:
+    from fitness_agent import get_fitness_insight, get_activity_recommendation
+    FITNESS_AGENT_AVAILABLE = True
+except ImportError:
+    FITNESS_AGENT_AVAILABLE = False
+
 # ======================================================================================
 # API Configuration and Database Setup
 # ======================================================================================
@@ -216,6 +223,57 @@ def main_app():
                     st.session_state.prediction_category = "Period is killing"
                     st.rerun()
         
+        # Fitness Agent - Expandable Container
+        if FITNESS_AGENT_AVAILABLE:
+            with st.expander("🏃‍♀️ Fitness Agent", expanded=False):
+                st.markdown("Your fitness agent connects to Samsung S Health to provide personalized meal recommendations based on your activity.")
+                
+                # Get fitness insight
+                fitness_insight = get_fitness_insight(target_user_id, get_mongo_client())
+                st.info(fitness_insight)
+                
+                # Get activity-based recommendation
+                activity_recommendation = get_activity_recommendation(target_user_id, get_mongo_client())
+                if activity_recommendation:
+                    st.markdown("---")
+                    st.markdown("**Today's Activity-Based Suggestion:**")
+                    st.markdown(f"🎯 **{activity_recommendation['type']}**: {activity_recommendation['message']}")
+                    
+                    if activity_recommendation.get("category"):
+                        if st.button(f"Get {activity_recommendation['category']} suggestions", 
+                                   key=f"fitness_{activity_recommendation['type']}"):
+                            st.session_state.auto_category = activity_recommendation['category']
+                            st.rerun()
+                
+                st.markdown("---")
+                st.markdown("**Quick Actions:**")
+                
+                # Manual activity input (for testing/backup)
+                st.markdown("**Manual Activity Input (for testing):**")
+                activity_type = st.selectbox(
+                    "Activity Level Today:",
+                    ["Low Activity", "Moderate Activity", "High Activity", "Workout Day"],
+                    key="manual_activity_input"
+                )
+                
+                if st.button("Get Activity-Based Suggestion", use_container_width=True, key="manual_activity_button"):
+                    st.session_state.manual_activity_trigger = True
+                    st.session_state.manual_activity_type = activity_type
+                    st.rerun()
+                
+                # S Health connection status
+                st.markdown("---")
+                st.markdown("**S Health Connection:**")
+                if st.button("🔗 Connect to S Health", use_container_width=True, key="connect_shealth_button"):
+                    st.info("S Health integration coming soon! For now, use manual input above.")
+                
+                # Fitness Dashboard
+                st.markdown("---")
+                st.markdown("**Fitness Dashboard:**")
+                if st.button("📊 Open Fitness Dashboard", use_container_width=True, key="open_fitness_dashboard_button"):
+                    st.session_state.show_fitness_dashboard = True
+                    st.rerun()
+        
         # Meal Planner Agent - Expandable Container
         with st.expander("🍽️ Meal Planner Agent", expanded=False):
             st.markdown("Let your agent plan your meals for a few days, based on your cravings and history.")
@@ -410,24 +468,38 @@ def main_app():
         st.markdown("Your personal palate assistant, built to learn your picky eating habits:")
     st.markdown("---")
 
-    # Handle proactive prediction trigger and auto-category suggestions
+    # Handle proactive prediction trigger, auto-category suggestions, and manual activity triggers
     if ('proactive_prediction_trigger' in st.session_state and st.session_state.proactive_prediction_trigger) or \
-       ('auto_category' in st.session_state and st.session_state.auto_category):
+       ('auto_category' in st.session_state and st.session_state.auto_category) or \
+       ('manual_activity_trigger' in st.session_state and st.session_state.manual_activity_trigger):
         
         # Debug: Show what's in session state
         if 'auto_category' in st.session_state:
             st.info(f"Debug: auto_category is set to: {st.session_state.auto_category}")
         
-        # Determine which category to use
+        # Determine which category to use and store activity data if needed
+        activity_data = None
+        manual_activity_type = None
         if 'auto_category' in st.session_state:
             prediction_category = st.session_state.auto_category
             del st.session_state.auto_category  # Clear it after use
+        elif 'manual_activity_trigger' in st.session_state and st.session_state.manual_activity_trigger:
+            # Handle manual activity trigger
+            manual_activity_type = st.session_state.get('manual_activity_type', 'Moderate Activity')
+            from fitness_agent import analyze_activity_data
+            activity_data = analyze_activity_data(manual_activity_type)
+            prediction_category = activity_data['category']
         else:
             prediction_category = "Period is killing"
         
         with st.spinner("Your agent is thinking..."):
             # Use the current target_user_id (could be Diya or the logged-in user)
             history = fetch_history_from_db(target_user_id)
+            
+            # Show activity-based message if it's a manual activity trigger
+            if activity_data and manual_activity_type:
+                st.info(f"🏃‍♀️ **{manual_activity_type}**: {activity_data['message']}")
+                st.info(f"🎯 **Nutrition Focus**: {activity_data['nutrition_focus']}")
             
             category_history = [item for item in history if item['category'] == prediction_category]
             
@@ -494,6 +566,9 @@ def main_app():
         
         if 'proactive_prediction_trigger' in st.session_state:
             del st.session_state.proactive_prediction_trigger
+        if 'manual_activity_trigger' in st.session_state:
+            del st.session_state.manual_activity_trigger
+            del st.session_state.manual_activity_type
         st.rerun()
 
 
@@ -518,6 +593,265 @@ def main_app():
         # Add a close button
         if st.button("❌ Close Dashboard", key="close_dashboard"):
             del st.session_state.show_agentic_dashboard
+            st.rerun()
+        
+        st.divider()
+    
+    # Fitness Dashboard (conditional display)
+    if FITNESS_AGENT_AVAILABLE and st.session_state.get('show_fitness_dashboard', False):
+        st.divider()
+        st.header("🏃‍♀️ Fitness Dashboard")
+        st.markdown("Track your fitness goals, calculate BMI, and get calorie-based meal suggestions!")
+        
+        # Import fitness agent functions
+        from fitness_agent import (
+            calculate_bmi, calculate_daily_calories, get_calorie_based_meal_suggestion,
+            save_fitness_goals, get_fitness_goals
+        )
+        
+        # Get existing fitness goals
+        existing_goals = get_fitness_goals(target_user_id, get_mongo_client())
+        
+        # Fitness Goals and BMI Calculator
+        with st.container(border=True):
+            st.subheader("🎯 Fitness Goals & BMI Calculator")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**Personal Information:**")
+                weight_kg = st.number_input("Weight (kg)", min_value=30.0, max_value=200.0, value=float(existing_goals.get('weight_kg', 60.0)) if existing_goals else 60.0, step=0.1)
+                height_cm = st.number_input("Height (cm)", min_value=100.0, max_value=200.0, value=float(existing_goals.get('height_cm', 160.0)) if existing_goals else 160.0, step=0.1)
+                age = st.number_input("Age", min_value=13, max_value=100, value=int(existing_goals.get('age', 25)) if existing_goals else 25)
+                gender = st.selectbox("Gender", ["female", "male"], index=0 if (existing_goals and existing_goals.get('gender', 'female') == 'female') else 1)
+                
+                st.markdown("**Activity Level:**")
+                # Get activity level index safely
+                activity_levels = ["sedentary", "light", "moderate", "active", "very_active"]
+                default_activity_index = 2  # moderate
+                if existing_goals and 'activity_level' in existing_goals:
+                    try:
+                        activity_index = activity_levels.index(existing_goals['activity_level'])
+                    except ValueError:
+                        activity_index = default_activity_index
+                else:
+                    activity_index = default_activity_index
+                
+                activity_level = st.selectbox(
+                    "Daily Activity Level",
+                    activity_levels,
+                    index=activity_index,
+                    format_func=lambda x: {
+                        "sedentary": "Sedentary (Little/no exercise)",
+                        "light": "Light (1-3 days/week)",
+                        "moderate": "Moderate (3-5 days/week)",
+                        "active": "Active (6-7 days/week)",
+                        "very_active": "Very Active (Hard exercise, physical job)"
+                    }[x]
+                )
+                
+                st.markdown("**Fitness Goal:**")
+                # Get goal index safely
+                goals = ["maintain", "lose", "gain"]
+                default_goal_index = 0  # maintain
+                if existing_goals and 'goal' in existing_goals:
+                    try:
+                        goal_index = goals.index(existing_goals['goal'])
+                    except ValueError:
+                        goal_index = default_goal_index
+                else:
+                    goal_index = default_goal_index
+                
+                goal = st.selectbox(
+                    "Primary Goal",
+                    goals,
+                    index=goal_index,
+                    format_func=lambda x: {
+                        "maintain": "Maintain Current Weight",
+                        "lose": "Lose Weight",
+                        "gain": "Gain Weight"
+                    }[x]
+                )
+            
+            with col2:
+                st.markdown("**BMI & Health Insights:**")
+                if st.button("Calculate BMI & Calories", use_container_width=True, key="calculate_bmi_button"):
+                    # Calculate BMI
+                    bmi_data = calculate_bmi(weight_kg, height_cm)
+                    
+                    # Calculate daily calories
+                    calorie_data = calculate_daily_calories(weight_kg, height_cm, age, gender, activity_level, goal)
+                    
+                    # Save to session state for display
+                    st.session_state.bmi_data = bmi_data
+                    st.session_state.calorie_data = calorie_data
+                    
+                    # Save fitness goals
+                    goals_data = {
+                        'weight_kg': weight_kg,
+                        'height_cm': height_cm,
+                        'age': age,
+                        'gender': gender,
+                        'activity_level': activity_level,
+                        'goal': goal
+                    }
+                    if save_fitness_goals(target_user_id, get_mongo_client(), goals_data):
+                        st.success("Fitness goals saved successfully!")
+                    
+                    st.rerun()
+                
+                # Display BMI results
+                if 'bmi_data' in st.session_state:
+                    bmi_data = st.session_state.bmi_data
+                    st.metric("BMI", f"{bmi_data['bmi']}", bmi_data['category'])
+                    st.info(f"**Health Insight:** {bmi_data['health_insight']}")
+                    st.info(f"**Meal Focus:** {bmi_data['meal_focus']}")
+                
+                # Display calorie results
+                if 'calorie_data' in st.session_state:
+                    calorie_data = st.session_state.calorie_data
+                    st.metric("Daily Target Calories", f"{calorie_data['target_calories']}", calorie_data['goal_message'])
+                    
+                    st.markdown("**Macro Breakdown:**")
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        st.metric("Protein", f"{calorie_data['macros']['protein_g']}g")
+                    with col_b:
+                        st.metric("Carbs", f"{calorie_data['macros']['carbs_g']}g")
+                    with col_c:
+                        st.metric("Fat", f"{calorie_data['macros']['fat_g']}g")
+        
+        # Calorie-Based Meal Suggestions
+        if 'calorie_data' in st.session_state:
+            st.divider()
+            st.subheader("🍽️ Calorie-Based Meal Suggestions")
+            
+            # Show learning insights
+            from fitness_agent import get_fitness_meal_insights
+            insights_data = get_fitness_meal_insights(target_user_id, get_mongo_client())
+            
+            if insights_data['total_meals_rated'] > 0:
+                st.info("🧠 **Your Agent's Learning Progress:**")
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    st.metric("Meals Rated", insights_data['total_meals_rated'])
+                with col_b:
+                    st.metric("Avg Rating", f"{insights_data['avg_rating']}/10")
+                with col_c:
+                    st.metric("Calorie Preference", insights_data['calorie_preferences'].title())
+                
+                st.info("💡 **Insights:**")
+                for insight in insights_data['insights']:
+                    st.write(f"• {insight}")
+                
+                st.info("🎯 **Recommendations:**")
+                for rec in insights_data['recommendations']:
+                    st.write(f"• {rec}")
+            else:
+                st.info("🧠 **Your agent is ready to learn!** Start rating meals to get personalized insights.")
+            
+            meal_type = st.selectbox(
+                "Select Meal Type:",
+                ["breakfast", "lunch", "dinner", "snack"],
+                format_func=lambda x: x.title()
+            )
+            
+            if st.button("Get Meal Suggestions", use_container_width=True, key="get_calorie_meals_button"):
+                with st.spinner("Generating personalized meal suggestions..."):
+                    target_calories = st.session_state.calorie_data['target_calories']
+                    meal_suggestions = get_calorie_based_meal_suggestion(
+                        target_user_id, get_mongo_client(), target_calories, meal_type
+                    )
+                    st.session_state.meal_suggestions = meal_suggestions
+                    st.session_state.last_meal_type = meal_type  # Track last meal type
+                    st.rerun()
+            
+            # Display meal suggestions with rating functionality
+            if 'meal_suggestions' in st.session_state:
+                # Clear rating saved flag if it exists
+                if 'rating_saved' in st.session_state:
+                    del st.session_state.rating_saved
+                
+                meal_suggestions = st.session_state.meal_suggestions
+                st.info(meal_suggestions['message'])
+                st.info(f"**Target Range:** {meal_suggestions['target_range']}")
+                
+                # Show learning insight
+                if 'learning_insight' in meal_suggestions:
+                    st.info(f"🧠 **Agent Learning:** {meal_suggestions['learning_insight']}")
+                
+                # Check if suggestions are personalized
+                if any('personalization' in suggestion for suggestion in meal_suggestions['suggestions']):
+                    st.success("🎯 **Personalized Suggestions:** These meals are tailored to your preferences based on your ratings!")
+                else:
+                    st.info("📋 **Default Suggestions:** Rate these meals to help your agent learn your preferences!")
+                
+                for i, suggestion in enumerate(meal_suggestions['suggestions']):
+                    with st.expander(f"🍽️ {suggestion['dish']} ({suggestion['estimated_cals']} calories)"):
+                        st.markdown(f"**Nutrition Focus:** {suggestion['focus']}")
+                        st.markdown(f"**Estimated Calories:** {suggestion['estimated_cals']}")
+                        
+                        # Show personalization if available
+                        if 'personalization' in suggestion:
+                            st.info(f"🎯 **Personalized:** {suggestion['personalization']}")
+                        
+                        # Rating section for each meal
+                        st.markdown("---")
+                        st.markdown("**Rate this suggestion to help your agent learn:**")
+                        
+                        rating = st.select_slider(
+                            f"Rate '{suggestion['dish']}' (1-10):",
+                            options=range(1, 11),
+                            value=5,
+                            key=f"fitness_meal_rating_{i}"
+                        )
+                        
+                        comments = st.text_area(
+                            f"Comments on '{suggestion['dish']}' (optional):",
+                            placeholder="e.g., Loved the protein content, perfect portion size",
+                            key=f"fitness_meal_comments_{i}"
+                        )
+                        
+                        if st.button(f"Save Rating for {suggestion['dish']}", key=f"save_fitness_rating_{i}"):
+                            from fitness_agent import save_fitness_meal_rating
+                            
+                            # Prepare meal data for saving
+                            meal_data = {
+                                'dish': suggestion['dish'],
+                                'meal_type': meal_type,
+                                'estimated_cals': suggestion['estimated_cals'],
+                                'rating': rating,
+                                'comments': comments,
+                                'focus': suggestion['focus'],
+                                'target_calories': st.session_state.calorie_data['target_calories']
+                            }
+                            
+                            if save_fitness_meal_rating(target_user_id, get_mongo_client(), meal_data):
+                                st.success(f"Rating saved! Your agent is learning from your feedback. Refresh to get new suggestions!")
+                                # Clear the rating saved flag
+                                st.session_state.rating_saved = True
+                            else:
+                                st.error("Failed to save rating. Please try again.")
+                
+                st.info(f"💡 **Nutrition Tip:** {meal_suggestions['nutrition_tip']}")
+                
+                # Show rating system info
+                if 'rating_saved' in st.session_state:
+                    st.success("✅ **Rating System Active:** Your agent is learning from your feedback! Each rating helps improve future suggestions.")
+                
+                # Add button to refresh insights after rating
+                if st.button("🔄 Refresh Learning Insights", key="refresh_insights_button"):
+                    st.rerun()
+        
+        # Add a close button
+        if st.button("❌ Close Fitness Dashboard", key="close_fitness_dashboard"):
+            del st.session_state.show_fitness_dashboard
+            if 'bmi_data' in st.session_state:
+                del st.session_state.bmi_data
+            if 'calorie_data' in st.session_state:
+                del st.session_state.calorie_data
+            if 'meal_suggestions' in st.session_state:
+                del st.session_state.meal_suggestions
             st.rerun()
         
         st.divider()
