@@ -238,7 +238,7 @@ def calculate_daily_calories(weight_kg: float, height_cm: float, age: int, gende
         }
     }
 
-def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calories: int, meal_type: str) -> Dict[str, Any]:
+def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calories: int, meal_type: str, food_preference: str) -> Dict[str, Any]:
     """
     Get calorie-based meal suggestions based on user's food history and calorie goals.
     Now includes agentic learning from user ratings.
@@ -248,6 +248,7 @@ def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calorie
         mongo_client: MongoDB client connection
         target_calories: Target calories for the meal
         meal_type: "breakfast", "lunch", "dinner", "snack"
+        food_preference: The user's preferred food type (e.g., "Protein", "Fiber")
         
     Returns:
         Dictionary with meal suggestions and calorie information
@@ -268,6 +269,11 @@ def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calorie
             "user_id": user_id
         }).sort("timestamp", -1).limit(50))
         
+        # Get all food choices from the main app for personalization
+        food_choices_history = list(food_collection.find(
+            {"user_id": user_id}
+        ).sort("timestamp", -1))
+        
         # Analyze user preferences from fitness meal ratings
         user_preferences = analyze_fitness_meal_preferences(fitness_meal_history)
         
@@ -285,7 +291,7 @@ def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calorie
         if fitness_meal_history:
             # Use advanced personalization if user has rating history
             meal_suggestions = get_personalized_meal_rotation(
-                user_id, mongo_client, meal_type, target_calories
+                user_id, mongo_client, meal_type, target_calories, food_preference, food_choices_history
             )
         else:
             # Use basic personalization for new users
@@ -464,6 +470,13 @@ def get_all_fitness_meals(meal_type: str) -> list:
             {"dish": "Dark chocolate with almonds", "estimated_cals": 160, "focus": "Antioxidants, healthy fats"},
             {"dish": "Smoothie with protein powder", "estimated_cals": 200, "focus": "High protein, quick energy"},
             {"dish": "Rice cakes with avocado", "estimated_cals": 170, "focus": "Light, healthy fats"}
+        ],
+        "regional": [
+            {"dish": "Masala Dosa with Sambar", "estimated_cals": 450, "focus": "South Indian, balanced meal"},
+            {"dish": "Gujarati Thali with Dal and Roti", "estimated_cals": 500, "focus": "Gujarati, complex carbs"},
+            {"dish": "Idli with Coconut Chutney", "estimated_cals": 250, "focus": "South Indian, light, easy to digest"},
+            {"dish": "Thepla with a side of yogurt", "estimated_cals": 320, "focus": "Gujarati, high fiber, iron"},
+            {"dish": "Poha with peanuts and curry leaves", "estimated_cals": 280, "focus": "Indian, quick, healthy carbs"}
         ]
     }
     
@@ -797,19 +810,29 @@ def get_daily_activity_summary(user_id: str, mongo_client) -> Dict[str, Any]:
             "message": "Unable to fetch today's summary. Check back later!"
         }
 
-def calculate_meal_preference_score(meal: Dict[str, Any], user_preferences: Dict[str, Any], high_rated_foods: list) -> float:
+def calculate_meal_preference_score(meal: Dict[str, Any], user_preferences: Dict[str, Any], food_choices_history: list) -> float:
     """
     Calculate a preference score for a meal based on user preferences and history.
     
     Args:
         meal: Meal dictionary
         user_preferences: User's learned preferences
-        high_rated_foods: User's highly rated foods
+        food_choices_history: User's general food rating history
         
     Returns:
         Preference score (higher is better)
     """
     score = 0.0
+    
+    # Penalize meals that have been rated before to avoid repetition
+    for item in food_choices_history:
+        if item.get('food', '').lower() == meal.get('dish', '').lower():
+            # Apply a heavy penalty if the food was disliked
+            if item.get('rating', 5) <= 3:
+                score -= 10.0
+            # Apply a moderate penalty to foods that were liked to encourage trying new ones
+            else:
+                score -= 3.0
     
     # Base score from calorie preference
     if user_preferences.get('preferred_calories') == 'higher':
@@ -837,18 +860,17 @@ def calculate_meal_preference_score(meal: Dict[str, Any], user_preferences: Dict
     elif 'fiber' in focus and user_preferences.get('preferred_fiber') == 'high':
         score += 1.5
     
-    # Score based on similarity to highly rated foods
-    for rated_food in high_rated_foods:
-        if any(word in meal['dish'].lower() for word in rated_food.get('food', '').lower().split()):
-            score += 1.0
-    
-    # Bonus for variety (avoid suggesting same meals repeatedly)
-    if meal.get('recently_suggested', False):
-        score -= 1.0
-    
+    # Score based on regional similarity
+    if "south indian" in focus or "south indian" in meal.get('dish', '').lower():
+        if "south indian" in food_choices_history:
+            score += 5.0
+    if "gujarati" in focus or "gujarati" in meal.get('dish', '').lower():
+        if "gujarati" in food_choices_history:
+            score += 5.0
+
     return score
 
-def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, target_calories: int) -> list:
+def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, target_calories: int, food_preference: str, food_choices_history: list) -> list:
     """
     Get personalized meal suggestions with rotation to avoid repetition.
     
@@ -857,6 +879,8 @@ def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, t
         mongo_client: MongoDB client connection
         meal_type: Type of meal
         target_calories: Target calories
+        food_preference: The user's preferred food type (e.g., "Protein", "Fiber")
+        food_choices_history: User's general food rating history
         
     Returns:
         List of personalized meal suggestions
@@ -871,6 +895,19 @@ def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, t
         
         # Get all available meals
         all_meals = get_all_fitness_meals(meal_type)
+        
+        # Filter by food preference.
+        if food_preference and food_preference != "Any":
+            keyword = food_preference.lower().replace(" ", "")
+            all_meals = [
+                meal for meal in all_meals
+                if keyword in meal.get('focus', '').lower().replace(" ", "") or
+                   keyword in meal.get('dish', '').lower().replace(" ", "")
+            ]
+
+        # If filtering removes all meals, fallback to original list
+        if not all_meals:
+            all_meals = get_all_fitness_meals(meal_type)
         
         # Calculate calorie range
         min_cals = target_calories * 0.25
@@ -894,7 +931,7 @@ def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, t
         # Score and sort meals
         scored_meals = []
         for meal in calorie_filtered:
-            score = calculate_meal_preference_score(meal, user_preferences, [])
+            score = calculate_meal_preference_score(meal, user_preferences, food_choices_history)
             scored_meals.append((meal, score))
         
         # Sort by score and take top meals

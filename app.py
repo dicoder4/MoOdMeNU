@@ -428,7 +428,7 @@ def main_app():
                 if notification:
                     priority_color = {
                         "high": "🔴",
-                        "medium": "🟡", 
+                        "medium": "�", 
                         "low": "🟢"
                     }.get(notification["priority"], "⚪")
                     
@@ -570,7 +570,6 @@ def main_app():
             del st.session_state.manual_activity_trigger
             del st.session_state.manual_activity_type
         st.rerun()
-
 
 
 
@@ -756,11 +755,19 @@ def main_app():
                 format_func=lambda x: x.title()
             )
             
+            # Added a food preference selectbox here.
+            food_preference = st.selectbox(
+                "Add a Food Preference:",
+                ["Any", "Protein", "Carbs", "Fiber", "Healthy Fats", "Low Calorie", "South Indian", "Gujarati"],
+                key="food_preference_select"
+            )
+            
             if st.button("Get Meal Suggestions", use_container_width=True, key="get_calorie_meals_button"):
                 with st.spinner("Generating personalized meal suggestions..."):
                     target_calories = st.session_state.calorie_data['target_calories']
+                    # Passed the new food_preference variable.
                     meal_suggestions = get_calorie_based_meal_suggestion(
-                        target_user_id, get_mongo_client(), target_calories, meal_type
+                        target_user_id, get_mongo_client(), target_calories, meal_type, food_preference
                     )
                     st.session_state.meal_suggestions = meal_suggestions
                     st.session_state.last_meal_type = meal_type  # Track last meal type
