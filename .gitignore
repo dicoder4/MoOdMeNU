@@ -6,6 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+# Streamlit secrets and configuration
+.streamlit/secrets.toml
+.streamlit/config.toml
+secrets.toml
+
 # Distribution / packaging
 .Python
 build/
