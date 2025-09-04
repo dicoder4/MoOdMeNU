@@ -1,21 +1,21 @@
-# app.py
 import streamlit as st
 import google.generativeai as genai
 import time
 import ast
+import json
 from datetime import datetime, timedelta
 from users import check_login, create_user_page, get_mongo_client, register_user, login_user
 
-# Import agentic intelligence features (optional - won't break if file doesn't exist)
+# Import agentic intelligence features
 try:
-    from agentic_intelligence import get_quick_insight, get_proactive_notification
+    from agentic_intelligence import get_quick_insight, get_proactive_notification, process_conversational_input, save_user_preferences, get_user_preferences
     AGENTIC_FEATURES_AVAILABLE = True
 except ImportError:
     AGENTIC_FEATURES_AVAILABLE = False
 
-# Import fitness agent features (optional - won't break if file doesn't exist)
+# Import fitness agent features
 try:
-    from fitness_agent import get_fitness_insight, get_activity_recommendation
+    from fitness_agent import get_fitness_insight, get_activity_recommendation, get_calorie_based_meal_suggestion, calculate_bmi, calculate_daily_calories, save_fitness_goals, get_fitness_goals, save_fitness_meal_rating, get_fitness_meal_insights, generate_gemini_fitness_suggestions
     FITNESS_AGENT_AVAILABLE = True
 except ImportError:
     FITNESS_AGENT_AVAILABLE = False
@@ -130,19 +130,15 @@ def generate_new_choices(category, current_choices, user_context="for me"):
 
 def main_app():
     """Main application logic for logged-in users."""
-    st.set_page_config(
-        page_title="My AI Food Agent",
-        layout="wide",
-        initial_sidebar_state="collapsed"
-    )
     
     # Session state for app mode
     if 'app_mode' not in st.session_state:
         st.session_state.app_mode = "Diya's Moods"
+        st.session_state.show_chat_window = False
 
     # --- Sidebar ---
     with st.sidebar:
-        st.header(f"Logged in as: {st.session_state.current_user}")
+        st.header(f"Logged in as: {st.session_state.current_user}!")
         st.markdown("---")
         
         # User mode selection
@@ -156,72 +152,73 @@ def main_app():
         target_user_id = "Diya" if st.session_state.app_mode == "Diya's Moods" else st.session_state.current_user
         
         st.markdown("---")
-
+        
         # Period Tracker - Expandable Container
-        with st.expander("📅 Period Tracker", expanded=False):
-            st.markdown("Your agent will use this to proactively suggest meals when your cravings might begin.")
-            
-            client = get_mongo_client()
-            db = client["food_agent_db"]
-            period_tracker_collection = db["period_tracker"]
-            tracker_data = period_tracker_collection.find_one({"user_id": "Diya"})
+        if st.session_state.app_mode == "Diya's Moods":
+            with st.expander("📅 Period Tracker", expanded=False):
+                st.markdown("Your agent will use this to proactively suggest meals when your cravings might begin.")
+                
+                client = get_mongo_client()
+                db = client["food_agent_db"]
+                period_tracker_collection = db["period_tracker"]
+                tracker_data = period_tracker_collection.find_one({"user_id": "Diya"})
 
-            if tracker_data:
-                last_period_date_value = tracker_data.get('last_period_date')
-                if isinstance(last_period_date_value, datetime):
-                    last_period_date_value = last_period_date_value.date()
+                if tracker_data:
+                    last_period_date_value = tracker_data.get('last_period_date')
+                    if isinstance(last_period_date_value, datetime):
+                        last_period_date_value = last_period_date_value.date()
+                    else:
+                        last_period_date_value = datetime.now().date() - timedelta(days=28)
+                    cycle_length_value = tracker_data.get('cycle_length', 28)
                 else:
                     last_period_date_value = datetime.now().date() - timedelta(days=28)
-                cycle_length_value = tracker_data.get('cycle_length', 28)
-            else:
-                last_period_date_value = datetime.now().date() - timedelta(days=28)
-                cycle_length_value = 28
+                    cycle_length_value = 28
 
-            last_period_date = st.date_input("Last Period Start Date", value=last_period_date_value)
-            cycle_length = st.number_input("Average Cycle Length (days)", min_value=1, value=cycle_length_value, key="cycle_length_input")
+                last_period_date = st.date_input("Last Period Start Date", value=last_period_date_value)
+                cycle_length = st.number_input("Average Cycle Length (days)", min_value=1, value=cycle_length_value, key="cycle_length_input")
 
-            if st.button("Save Tracker Data", use_container_width=True, key="save_tracker_button"):
-                data_to_save = {
-                    "user_id": "Diya",
-                    "last_period_date": datetime.combine(last_period_date, datetime.min.time()),
-                    "cycle_length": cycle_length
-                }
-                period_tracker_collection.update_one(
-                    {"user_id": "Diya"},
-                    {"$set": data_to_save},
-                    upsert=True
-                )
-                st.success("Period tracker data saved successfully!")
-                st.rerun()
+                if st.button("Save Tracker Data", use_container_width=True, key="save_tracker_button"):
+                    data_to_save = {
+                        "user_id": "Diya",
+                        "last_period_date": datetime.combine(last_period_date, datetime.min.time()),
+                        "cycle_length": cycle_length
+                    }
+                    period_tracker_collection.update_one(
+                        {"user_id": "Diya"},
+                        {"$set": data_to_save},
+                        upsert=True
+                    )
+                    st.success("Period tracker data saved successfully!")
+                    st.rerun()
 
-            today = datetime.now().date()
-            next_period_start = last_period_date + timedelta(days=cycle_length)
-            
-            st.markdown("---")
-            st.markdown("**Your Agent's Predictions:**")
-            
-            predicted_dates = [next_period_start + timedelta(days=i * cycle_length) for i in range(5)]
-            for i, date in enumerate(predicted_dates):
-                st.markdown(f"**{i+1}.** {date.strftime('%B %d, %Y')}")
+                today = datetime.now().date()
+                next_period_start = last_period_date + timedelta(days=cycle_length)
                 
-            st.markdown("---")
-            
-            days_since_last_period = (today - last_period_date).days
-            days_to_next_period = cycle_length - days_since_last_period
+                st.markdown("---")
+                st.markdown("**Your Agent's Predictions:**")
+                
+                predicted_dates = [next_period_start + timedelta(days=i * cycle_length) for i in range(5)]
+                for i, date in enumerate(predicted_dates):
+                    st.markdown(f"**{i+1}.** {date.strftime('%B %d, %Y')}")
+                    
+                st.markdown("---")
+                
+                days_since_last_period = (today - last_period_date).days
+                days_to_next_period = cycle_length - days_since_last_period
 
-            if days_to_next_period <= 2 and days_to_next_period > 0:
-                st.warning("Hey Diya, your agent knows your period is around the corner. It's okay to feel a bit moody! We've got you covered.")
-                if st.button("Get a 'Period is killing' suggestion now!", use_container_width=True, key="proactive_suggestion_button"):
-                    st.session_state.proactive_prediction_trigger = True
-                    st.session_state.prediction_category = "Period is killing"
-                    st.rerun()
+                if days_to_next_period <= 2 and days_to_next_period > 0:
+                    st.warning("Hey Diya, your agent knows your period is around the corner. It's okay to feel a bit moody! We've got you covered.")
+                    if st.button("Get a 'Period is killing' suggestion now!", use_container_width=True, key="proactive_suggestion_button"):
+                        st.session_state.proactive_prediction_trigger = True
+                        st.session_state.prediction_category = "Period is killing"
+                        st.rerun()
 
-            elif days_to_next_period <= cycle_length and days_to_next_period >= cycle_length - 4: # Assuming a 5-day period
-                st.info("Hey Diya, we know you're on your period, so we have some personalized suggestions to help with the cravings!")
-                if st.button("Get a 'Period is killing' suggestion now!", use_container_width=True, key="proactive_suggestion_button"):
-                    st.session_state.proactive_prediction_trigger = True
-                    st.session_state.prediction_category = "Period is killing"
-                    st.rerun()
+                elif days_to_next_period <= cycle_length and days_to_next_period >= cycle_length - 4:
+                    st.info("Hey Diya, we know you're on your period, so we have some personalized suggestions to help with the cravings!")
+                    if st.button("Get a 'Period is killing' suggestion now!", use_container_width=True, key="proactive_suggestion_button"):
+                        st.session_state.proactive_prediction_trigger = True
+                        st.session_state.prediction_category = "Period is killing"
+                        st.rerun()
         
         # Fitness Agent - Expandable Container
         if FITNESS_AGENT_AVAILABLE:
@@ -297,50 +294,34 @@ def main_app():
                         ])
 
                         if st.session_state.app_mode == "Diya's Moods":
-                            plan_prompt = f"""
-                            You are a food expert creating a meal plan for a picky vegetarian eater who does not eat eggs. The user wants to plan meals for the next {num_days} days, focusing on the "{meal_plan_category}" category.
-                            
-                            The user's general preferences are:
-                            - Only eats gravies and soups, not whole vegetables (except for onion, capsicum, garlic etc).
-                            - Prefers Jowar, Bajra, and Makai rotis.
-                            - Is on a weightloss journey but not that hardcore.
-                            - For 'Daily choices', focus on Indian and South Indian meals.
-                            - For 'Protein is calling', suggest dishes with tofu, paneer, chhole, or rajma.
-                            - For 'Period is killing', suggest comfort foods.
-                            - For 'Exams', suggest easy and quick comfort meals.
-                            
-                            Here are some of their past choices and comments for this specific category:
-                            {recent_history_str if recent_history_str else "No specific comments for this category yet."}
-                            
-                            Please create a unique meal plan for each of the {num_days} days. Each plan should include a suggested dish and a brief reason why they might like it, mixing insights from their general preferences and their specific comments.
-                            
-                            The response must be a clean, concise JSON array of objects. Each object should have a 'day', 'dish', and 'reason' key.
-                            
-                            Example response:
-                            [
-                              {{"day": "Day 1", "dish": "Dish 1", "reason": "Reason 1"}},
-                              {{"day": "Day 2", "dish": "Dish 2", "reason": "Reason 2"}},
-                              {{"day": "Day 3", "dish": "Dish 3", "reason": "Reason 3"}}
-                            ]
-                            """
+                            general_preferences = get_user_preferences(target_user_id, get_mongo_client())
+                            # Fallback if no preferences are saved
+                            if not general_preferences:
+                                general_preferences = "The user is a picky vegetarian eater who does not eat eggs. They prefer gravies and soups, and enjoy Indian and South Indian cuisines."
+
                         else:
-                            plan_prompt = f"""
-                            You are a food expert creating a meal plan for a person who wants to explore new food choices. The user wants to plan meals for the next {num_days} days, focusing on the "{meal_plan_category}" category.
-                            
-                            Here are some of their past choices and comments for this specific category:
-                            {recent_history_str if recent_history_str else "No specific comments for this category yet."}
-                            
-                            Please create a unique meal plan for each of the {num_days} days. Each plan should include a suggested dish and a brief reason why they might like it, referencing their past comments.
-                            
-                            The response must be a clean, concise JSON array of objects. Each object should have a 'day', 'dish', and 'reason' key.
-                            
-                            Example response:
-                            [
-                              {{"day": "Day 1", "dish": "Dish 1", "reason": "Reason 1"}},
-                              {{"day": "Day 2", "dish": "Dish 2", "reason": "Reason 2"}},
-                              {{"day": "Day 3", "dish": "Dish 3", "reason": "Reason 3"}}
-                            ]
-                            """
+                            general_preferences = "The user is exploring new food choices and preferences. Focus on variety and discovery, considering their past ratings and comments for personalization."
+
+                        plan_prompt = f"""
+                        You are a food expert creating a meal plan for a vegetarian eater. The user wants to plan meals for the next {num_days} days, focusing on the "{meal_plan_category}" category.
+                        
+                        The user's general preferences are:
+                        {general_preferences}
+                        
+                        Here are some of their past choices and comments for this specific category:
+                        {recent_history_str if recent_history_str else "No specific comments for this category yet."}
+                        
+                        Please create a unique meal plan for each of the {num_days} days. Each plan should include a suggested dish and a brief reason why they might like it, mixing insights from their general preferences and their specific comments.
+                        
+                        The response must be a clean, concise JSON array of objects. Each object should have a 'day', 'dish', and 'reason' key.
+                        
+                        Example response:
+                        [
+                          {{"day": "Day 1", "dish": "Dish 1", "reason": "Reason 1"}},
+                          {{"day": "Day 2", "dish": "Dish 2", "reason": "Reason 2"}},
+                          {{"day": "Day 3", "dish": "Dish 3", "reason": "Reason 3"}}
+                        ]
+                        """
 
                         try:
                             model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
@@ -428,7 +409,7 @@ def main_app():
                 if notification:
                     priority_color = {
                         "high": "🔴",
-                        "medium": "�", 
+                        "medium": "🟡", 
                         "low": "🟢"
                     }.get(notification["priority"], "⚪")
                     
@@ -467,6 +448,24 @@ def main_app():
     else:
         st.markdown("Your personal palate assistant, built to learn your picky eating habits:")
     st.markdown("---")
+    
+    # Text area for general food preferences
+    st.markdown("### 📝 General Food Preferences")
+    st.markdown("Tell your agent about your likes and dislikes. This helps it understand your unique palate.")
+    
+    user_preferences_text = st.text_area(
+        "Enter your preferences here:",
+        value=get_user_preferences(target_user_id, get_mongo_client()),
+        height=150,
+        placeholder="e.g., I don't like cashews in my food but like them plain. I'm allergic to peanuts. I love spicy and tangy flavors."
+    )
+    
+    if st.button("Save Preferences", key="save_preferences_button"):
+        with st.spinner("Saving preferences..."):
+            save_user_preferences(target_user_id, get_mongo_client(), user_preferences_text)
+            st.session_state.user_preferences_text = user_preferences_text
+            st.success("Your preferences have been saved!")
+            st.rerun()
 
     # Handle proactive prediction trigger, auto-category suggestions, and manual activity triggers
     if ('proactive_prediction_trigger' in st.session_state and st.session_state.proactive_prediction_trigger) or \
@@ -486,7 +485,6 @@ def main_app():
         elif 'manual_activity_trigger' in st.session_state and st.session_state.manual_activity_trigger:
             # Handle manual activity trigger
             manual_activity_type = st.session_state.get('manual_activity_type', 'Moderate Activity')
-            from fitness_agent import analyze_activity_data
             activity_data = analyze_activity_data(manual_activity_type)
             prediction_category = activity_data['category']
         else:
@@ -510,27 +508,20 @@ def main_app():
             
             # Adjust preferences based on user mode
             if st.session_state.app_mode == "Diya's Moods":
-                general_preferences = [
-                    "- Only eats gravies and soups, not whole vegetables (except for onion, capsicum, garlic etc).",
-                    "- Prefers Jowar, Bajra, and Makai rotis.",
-                    "- For 'Daily choices', focus on Indian and South Indian meals.",
-                    "- For 'Protein is calling', suggest dishes with tofu, paneer, chhole, or rajma.",
-                    "- For 'Period is killing', suggest comfort foods.",
-                    "- For 'Exams', suggest easy and quick comfort meals.",
-                    "- For 'Desserts' and 'Cheat meals', be creative with the given options."
-                ]
+                general_preferences = get_user_preferences(target_user_id, get_mongo_client())
+                # Fallback if no preferences are saved
+                if not general_preferences:
+                    general_preferences = "The user is a picky vegetarian eater who does not eat eggs. They prefer gravies and soups, and enjoy Indian and South Indian cuisines."
+
             else:
-                general_preferences = [
-                    "- User is exploring new food choices and preferences.",
-                    "- Focus on variety and discovery.",
-                    "- Consider past ratings and comments for personalization."
-                ]
+                general_preferences = "The user is exploring new food choices and preferences. Focus on variety and discovery, considering their past ratings and comments for personalization."
+
             
             prompt = f"""
             You are a food expert assisting a user with their food choices. The user's current eating occasion is "{prediction_category}".
             
             The user's general preferences are:
-            {chr(10).join(general_preferences)}
+            {general_preferences}
             
             Here are some of their past choices and comments for this specific category:
             {recent_category_history_str if recent_category_history_str else "No specific comments for this category yet."}
@@ -572,11 +563,8 @@ def main_app():
         st.rerun()
 
 
-
-
-    # ---
     st.divider()
-
+    
     # Agentic Intelligence Dashboard (conditional display)
     if AGENTIC_FEATURES_AVAILABLE and st.session_state.get('show_agentic_dashboard', False):
         st.divider()
@@ -601,12 +589,6 @@ def main_app():
         st.divider()
         st.header("🏃‍♀️ Fitness Dashboard")
         st.markdown("Track your fitness goals, calculate BMI, and get calorie-based meal suggestions!")
-        
-        # Import fitness agent functions
-        from fitness_agent import (
-            calculate_bmi, calculate_daily_calories, get_calorie_based_meal_suggestion,
-            save_fitness_goals, get_fitness_goals
-        )
         
         # Get existing fitness goals
         existing_goals = get_fitness_goals(target_user_id, get_mongo_client())
@@ -649,7 +631,7 @@ def main_app():
                     }[x]
                 )
                 
-                st.markdown("**Fitness Goal:**")
+                st.markdown("**Fitness Goal:")
                 # Get goal index safely
                 goals = ["maintain", "lose", "gain"]
                 default_goal_index = 0  # maintain
@@ -726,7 +708,6 @@ def main_app():
             st.subheader("🍽️ Calorie-Based Meal Suggestions")
             
             # Show learning insights
-            from fitness_agent import get_fitness_meal_insights
             insights_data = get_fitness_meal_insights(target_user_id, get_mongo_client())
             
             if insights_data['total_meals_rated'] > 0:
@@ -752,99 +733,96 @@ def main_app():
             meal_type = st.selectbox(
                 "Select Meal Type:",
                 ["breakfast", "lunch", "dinner", "snack"],
-                format_func=lambda x: x.title()
+                format_func=lambda x: x.title(),
+                key="meal_type_select"
             )
-            
-            # Added a food preference selectbox here.
-            food_preference = st.selectbox(
-                "Add a Food Preference:",
-                ["Any", "Protein", "Carbs", "Fiber", "Healthy Fats", "Low Calorie", "South Indian", "Gujarati"],
-                key="food_preference_select"
+
+            # New selectbox for cuisine preference (expanded)
+            cuisine_preference = st.selectbox(
+                "Add a Cuisine Preference:",
+                ["Any", "Indian", "North Indian", "South Indian", "Gujarati", "Italian", "Continental"],
+                key="cuisine_preference_select"
             )
             
             if st.button("Get Meal Suggestions", use_container_width=True, key="get_calorie_meals_button"):
                 with st.spinner("Generating personalized meal suggestions..."):
                     target_calories = st.session_state.calorie_data['target_calories']
-                    # Passed the new food_preference variable.
+                    # Pass the cuisine preference to the suggestion function
                     meal_suggestions = get_calorie_based_meal_suggestion(
-                        target_user_id, get_mongo_client(), target_calories, meal_type, food_preference
+                        target_user_id, get_mongo_client(), target_calories, meal_type, cuisine_preference
                     )
                     st.session_state.meal_suggestions = meal_suggestions
                     st.session_state.last_meal_type = meal_type  # Track last meal type
+                    # Initialize rating state for multi-save
+                    st.session_state.fitness_multi_ratings = {}
                     st.rerun()
             
-            # Display meal suggestions with rating functionality
-            if 'meal_suggestions' in st.session_state:
-                # Clear rating saved flag if it exists
-                if 'rating_saved' in st.session_state:
-                    del st.session_state.rating_saved
-                
-                meal_suggestions = st.session_state.meal_suggestions
-                st.info(meal_suggestions['message'])
-                st.info(f"**Target Range:** {meal_suggestions['target_range']}")
+            # Display meal suggestions with multi-rating functionality
+            if 'meal_suggestions' in st.session_state and isinstance(st.session_state.meal_suggestions, dict):
+                st.info(st.session_state.meal_suggestions['message'])
+                st.info(f"**Target Range:** {st.session_state.meal_suggestions['target_range']}")
                 
                 # Show learning insight
-                if 'learning_insight' in meal_suggestions:
-                    st.info(f"🧠 **Agent Learning:** {meal_suggestions['learning_insight']}")
+                if 'learning_insight' in st.session_state.meal_suggestions:
+                    st.info(f"🧠 **Agent Learning:** {st.session_state.meal_suggestions['learning_insight']}")
                 
-                # Check if suggestions are personalized
-                if any('personalization' in suggestion for suggestion in meal_suggestions['suggestions']):
-                    st.success("🎯 **Personalized Suggestions:** These meals are tailored to your preferences based on your ratings!")
-                else:
-                    st.info("📋 **Default Suggestions:** Rate these meals to help your agent learn your preferences!")
-                
-                for i, suggestion in enumerate(meal_suggestions['suggestions']):
-                    with st.expander(f"🍽️ {suggestion['dish']} ({suggestion['estimated_cals']} calories)"):
-                        st.markdown(f"**Nutrition Focus:** {suggestion['focus']}")
-                        st.markdown(f"**Estimated Calories:** {suggestion['estimated_cals']}")
-                        
-                        # Show personalization if available
-                        if 'personalization' in suggestion:
-                            st.info(f"🎯 **Personalized:** {suggestion['personalization']}")
-                        
-                        # Rating section for each meal
-                        st.markdown("---")
-                        st.markdown("**Rate this suggestion to help your agent learn:**")
-                        
-                        rating = st.select_slider(
-                            f"Rate '{suggestion['dish']}' (1-10):",
-                            options=range(1, 11),
-                            value=5,
-                            key=f"fitness_meal_rating_{i}"
-                        )
-                        
-                        comments = st.text_area(
-                            f"Comments on '{suggestion['dish']}' (optional):",
-                            placeholder="e.g., Loved the protein content, perfect portion size",
-                            key=f"fitness_meal_comments_{i}"
-                        )
-                        
-                        if st.button(f"Save Rating for {suggestion['dish']}", key=f"save_fitness_rating_{i}"):
-                            from fitness_agent import save_fitness_meal_rating
+                if st.session_state.meal_suggestions['suggestions']:
+                    for i, suggestion in enumerate(st.session_state.meal_suggestions['suggestions']):
+                        with st.expander(f"🍽️ {suggestion['dish']} ({suggestion['estimated_cals']} calories)"):
+                            st.markdown(f"**Nutrition Focus:** {suggestion['focus']}")
+                            st.markdown(f"**Estimated Calories:** {suggestion['estimated_cals']}")
                             
-                            # Prepare meal data for saving
+                            # Show personalization if available
+                            if 'personalization' in suggestion:
+                                st.info(f"🎯 **Personalized:** {suggestion['personalization']}")
+                            
+                            # Multi-rating: store per-item rating/comments in session
+                            st.markdown("---")
+                            st.markdown("**Rate this suggestion to help your agent learn:**")
+                            default_rating = 5
+                            rating_key = f"fitness_meal_rating_{i}"
+                            comments_key = f"fitness_meal_comments_{i}"
+                            rating = st.select_slider(
+                                f"Rate '{suggestion['dish']}' (1-10):",
+                                options=range(1, 11),
+                                value=st.session_state.fitness_multi_ratings.get(rating_key, default_rating),
+                                key=rating_key
+                            )
+                            comments = st.text_area(
+                                f"Comments on '{suggestion['dish']}' (optional):",
+                                placeholder="e.g., Loved the protein content, perfect portion size",
+                                value=st.session_state.fitness_multi_ratings.get(comments_key, ""),
+                                key=comments_key
+                            )
+                            # Keep latest in a helper dict
+                            st.session_state.fitness_multi_ratings[rating_key] = rating
+                            st.session_state.fitness_multi_ratings[comments_key] = comments
+                    
+                    # Save all ratings at once (no rerun until done)
+                    if st.button("💾 Save All Ratings", key="save_all_fitness_ratings"):
+                        saved_count = 0
+                        for i, suggestion in enumerate(st.session_state.meal_suggestions['suggestions']):
+                            rating_key = f"fitness_meal_rating_{i}"
+                            comments_key = f"fitness_meal_comments_{i}"
+                            rating_val = st.session_state.fitness_multi_ratings.get(rating_key, 5)
+                            comments_val = st.session_state.fitness_multi_ratings.get(comments_key, "")
                             meal_data = {
                                 'dish': suggestion['dish'],
-                                'meal_type': meal_type,
+                                'meal_type': st.session_state.last_meal_type,
                                 'estimated_cals': suggestion['estimated_cals'],
-                                'rating': rating,
-                                'comments': comments,
+                                'rating': rating_val,
+                                'comments': comments_val,
                                 'focus': suggestion['focus'],
                                 'target_calories': st.session_state.calorie_data['target_calories']
                             }
-                            
                             if save_fitness_meal_rating(target_user_id, get_mongo_client(), meal_data):
-                                st.success(f"Rating saved! Your agent is learning from your feedback. Refresh to get new suggestions!")
-                                # Clear the rating saved flag
-                                st.session_state.rating_saved = True
-                            else:
-                                st.error("Failed to save rating. Please try again.")
+                                saved_count += 1
+                        st.success(f"Saved {saved_count} ratings! Your agent is learning from your feedback.")
+                        # Keep suggestions on screen for more actions; no rerun here
+                else:
+                    st.info("No personalized suggestions found. Try logging more diverse meals to help your agent learn!")
                 
-                st.info(f"💡 **Nutrition Tip:** {meal_suggestions['nutrition_tip']}")
-                
-                # Show rating system info
-                if 'rating_saved' in st.session_state:
-                    st.success("✅ **Rating System Active:** Your agent is learning from your feedback! Each rating helps improve future suggestions.")
+                st.info(f"💡 **Nutrition Tip:** {st.session_state.meal_suggestions['nutrition_tip']}")
                 
                 # Add button to refresh insights after rating
                 if st.button("🔄 Refresh Learning Insights", key="refresh_insights_button"):
@@ -859,6 +837,8 @@ def main_app():
                 del st.session_state.calorie_data
             if 'meal_suggestions' in st.session_state:
                 del st.session_state.meal_suggestions
+            if 'fitness_multi_ratings' in st.session_state:
+                del st.session_state.fitness_multi_ratings
             st.rerun()
         
         st.divider()
@@ -902,7 +882,7 @@ def main_app():
         st.divider()
 
     st.header("Log a New Food Choice")
-    st.markdown(f"Select an eating occasion and rate the food you chose to help train your agent. You can now enter your own dishes too!")
+    st.markdown("Select an eating occasion and rate the food you chose to help train your agent. You can now enter your own dishes too!")
 
     with st.container(border=True):
         if 'selected_category' not in st.session_state:
@@ -1030,53 +1010,36 @@ def main_app():
                         f"Food: {item['food']}, Rating: {item['rating']}/10, Comments: {item.get('comments', 'None')}" 
                         for item in category_history[:5]
                     ])
-
-                    if st.session_state.app_mode == "Diya's Moods":
-                        prompt = f"""
-                        You are a food expert assisting a picky vegetarian eater who does not eat eggs. The user's current eating occasion is "{prediction_category}".
-                        
-                        The user's general preferences are:
-                        - Only eats gravies and soups, not whole vegetables (except for onion, capsicum, garlic etc).
-                        - Prefers Jowar, Bajra, and Makai rotis.
-                        - For 'Daily choices', focus on Indian and South Indian meals.
-                        - For 'Protein is calling', suggest dishes with tofu, paneer, chhole, or rajma.
-                        - For 'Period is killing', suggest comfort foods.
-                        - For 'Exams', suggest easy and quick comfort meals.
-                        - For 'Desserts' and 'Cheat meals', be creative with the given options.
-                        
-                        
-                        Here are some of their past choices and comments for this specific category:
-                        {recent_category_history_str if recent_category_history_str else "No specific comments for this category yet."}
-                        
-                        Please suggest exactly three new and delicious food items the user might enjoy for this occasion. For each dish, provide a brief, personalized reason why they might like it, mixing insights from their general preferences and their specific comments.
-                        
-                        The response must be a clean, concise JSON array of objects, with each object having a 'dish' and a 'reason' key. Do not include any other text, just the JSON.
-                        
-                        Example response:
-                        [
-                          {{"dish": "Dish 1", "reason": "Reason 1"}},
-                          {{"dish": "Dish 2", "reason": "Reason 2"}},
-                          {{"dish": "Dish 3", "reason": "Reason 3"}}
-                        ]
-                        """
-                    else:
-                        prompt = f"""
-                        You are a food expert assisting a person who wants to explore new food choices. The user's current eating occasion is "{prediction_category}".
-                        
-                        Here are some of their past choices and comments for this specific category:
-                        {recent_category_history_str if recent_category_history_str else "No specific comments for this category yet."}
-                        
-                        Please suggest exactly three new and delicious food items the user might enjoy for this occasion. For each dish, provide a brief, personalized reason why they might like it, referencing their past comments.
-                        
-                        The response must be a clean, concise JSON array of objects, with each object having a 'dish' and a 'reason' key. Do not include any other text, just the JSON.
-                        
-                        Example response:
-                        [
-                          {{"dish": "Dish 1", "reason": "Reason 1"}},
-                          {{"dish": "Dish 2", "reason": "Reason 2"}},
-                          {{"dish": "Dish 3", "reason": "Reason 3"}}
-                        ]
-                        """
+                    
+                    # Get user's general preferences from the database
+                    general_preferences = get_user_preferences(target_user_id, get_mongo_client())
+                    # Fallback if no preferences are saved
+                    if not general_preferences:
+                         if st.session_state.app_mode == "Diya's Moods":
+                            general_preferences = "The user is a picky vegetarian eater who does not eat eggs. They prefer gravies and soups, and enjoy Indian and South Indian cuisines."
+                         else:
+                            general_preferences = "The user is exploring new food choices and preferences. Focus on variety and discovery, considering their past ratings and comments for personalization."
+                    
+                    prompt = f"""
+                    You are a food expert assisting a user with their food choices. The user's current eating occasion is "{prediction_category}".
+                    
+                    The user's general preferences are:
+                    {general_preferences}
+                    
+                    Here are some of their past choices and comments for this specific category:
+                    {recent_category_history_str if recent_category_history_str else "No specific comments for this category yet."}
+                    
+                    Please suggest exactly three new and delicious food items the user might enjoy for this occasion. For each dish, provide a brief, personalized reason why they might like it, mixing insights from their general preferences and their specific comments.
+                    
+                    The response must be a clean, concise JSON array of objects, with each object having a 'dish' and a 'reason' key. Do not include any other text, just the JSON.
+                    
+                    Example response:
+                    [
+                      {{"dish": "Dish 1", "reason": "Reason 1"}},
+                      {{"dish": "Dish 2", "reason": "Reason 2"}},
+                      {{"dish": "Dish 3", "reason": "Reason 3"}}
+                    ]
+                    """
                     
                     try:
                         model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
@@ -1283,8 +1246,133 @@ def main_app():
     else:
         st.info("No food choices logged yet. Start adding some above!")
 
+    # Floating chat icon and window (moved to bottom-left)
+    if 'show_chat_window' not in st.session_state:
+        st.session_state.show_chat_window = False
+
+    with st.container():
+        st.markdown(
+            """
+            <style>
+            .chat-icon-container {
+                position: fixed;
+                bottom: 20px;
+                left: 20px;
+                z-index: 1000;
+            }
+            .chat-window {
+                position: fixed;
+                bottom: 20px;
+                left: 20px;
+                width: 350px;
+                height: 500px;
+                border-radius: 15px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+                overflow: hidden;
+                z-index: 999;
+                display: flex;
+                flex-direction: column;
+                background-color: #0e1117;
+            }
+            .chat-header {
+                background-color: #262730;
+                color: white;
+                padding: 10px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                border-top-left-radius: 15px;
+                border-top-right-radius: 15px;
+            }
+            .chat-body {
+                flex-grow: 1;
+                padding: 10px;
+                overflow-y: auto;
+            }
+            .user-message {
+                text-align: right;
+                background-color: #1a433f;
+                padding: 8px;
+                border-radius: 10px;
+                margin: 5px;
+            }
+            .agent-message {
+                text-align: left;
+                background-color: #2d2d2d;
+                padding: 8px;
+                border-radius: 10px;
+                margin: 5px;
+            }
+            .chat-footer {
+                padding: 10px;
+                border-top: 1px solid #333;
+                background-color: #262730;
+                display: flex;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # Bottom-left cloud icon using a standard Streamlit button for reliability
+        if not st.session_state.show_chat_window:
+            with st.container():
+                st.markdown('<div class="chat-icon-container">', unsafe_allow_html=True)
+                if st.button("☁️", key="open_chat_button"):
+                    st.session_state.show_chat_window = True
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            with st.container():
+                st.markdown('<div class="chat-window">', unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="chat-header"><span>AI Agent Chat</span><button class="close-button" onclick="window.parent.postMessage({ ' +
+                    'type: ' + json.dumps('streamlit:setSessionState') + ', ' +
+                    'data: { ' +
+                    'key: ' + json.dumps('show_chat_window') + ', ' +
+                    'value: false ' +
+                    '} ' +
+                    '}, ' + json.dumps('*') + ');">❌</button></div>',
+                    unsafe_allow_html=True
+                )
+                
+                with st.container():
+                    chat_history_container = st.container()
+
+                    # Chat history (general, not fitness-only)
+                    if 'chat_history' not in st.session_state:
+                        st.session_state.chat_history = [{'role': 'model', 'parts': ['Hello! I am your personal food agent. Ask me anything about your food preferences or to get suggestions!']}]
+
+                    with chat_history_container:
+                        for chat in st.session_state.chat_history:
+                            role = chat['role']
+                            message = chat['parts'][0]
+                            if role == 'user':
+                                st.markdown(f'<div class="user-message">{message}</div>', unsafe_allow_html=True)
+                            else:
+                                st.markdown(f'<div class="agent-message">{message}</div>', unsafe_allow_html=True)
+
+                    # Chat input
+                    with st.container():
+                        user_input = st.chat_input("Ask MoOdMeNU anything...", key="chat_input")
+                        if user_input:
+                            st.session_state.chat_history.append({'role': 'user', 'parts': [user_input]})
+                            with st.spinner("MoOdMeNU is thinking..."):
+                                client = get_mongo_client()
+                                response = process_conversational_input(target_user_id, client, st.session_state.chat_history)
+                                st.session_state.chat_history.append({'role': 'model', 'parts': [response]})
+                            st.rerun()
+
+                st.markdown('</div>', unsafe_allow_html=True)
+
+
 # --- Application Entry Point ---
 if __name__ == "__main__":
+    st.set_page_config(
+        page_title="My AI Food Agent",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
     if not check_login():
         create_user_page()
     else:

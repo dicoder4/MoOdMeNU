@@ -9,6 +9,79 @@ by analyzing user activity data and communicating with the food agent.
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any
+import ast
+import json
+import google.generativeai as genai
+
+def generate_gemini_fitness_suggestions(user_id: str, mongo_client, meal_type: str, cuisine_preference: str, min_cals: float, max_cals: float, food_choices_history: list) -> list:
+    """
+    Use Gemini to generate meal suggestions conditioned on cuisine, meal type, calorie band and user history.
+    Returns a list of {dish, estimated_cals, focus} dicts.
+    """
+    # Build a concise, structured prompt for JSON output
+    # Extract a short recent history snippet to ground the model
+    recent_history_lines = []
+    for item in food_choices_history[:8]:
+        recent_history_lines.append(f"Dish: {item.get('food','')}, Rating: {item.get('rating',5)}/10, Category: {item.get('category','')}, Comments: {item.get('comments','')}")
+    recent_history_text = "\n".join(recent_history_lines) if recent_history_lines else "None"
+
+    cuisine_text = cuisine_preference if cuisine_preference and cuisine_preference != "Any" else "Any/Generic"
+
+    prompt = f"""
+    You are a nutrition-forward vegetarian meal planner. Generate diverse, non-repetitive meal ideas.
+
+    Constraints:
+    - Vegetarian only, no eggs. Prefer gravies/soups over whole vegetables when reasonable.
+    - Meal type: {meal_type}
+    - Cuisine focus: {cuisine_text}
+    - Estimated calories MUST be within [{int(min_cals)}, {int(max_cals)}].
+    - Consider the user's highly-rated items and avoid poorly-rated ones.
+    - Keep names approachable for home cooking in India.
+
+    User history (most recent first):
+    {recent_history_text}
+
+    Output EXACTLY a JSON array of 5 objects, no prose. Each object must be:
+    {{
+      "dish": "string, short name",
+      "estimated_cals": number,  // integer calories in range
+      "focus": "string, e.g., High protein | Balanced | Light | South Indian | North Indian"
+    }}
+    """
+
+    try:
+        model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
+        response = model.generate_content(prompt)
+        if not response or not getattr(response, 'text', None):
+            return []
+        raw_text = response.text.strip('`').replace('json', '').strip()
+        data = ast.literal_eval(raw_text)
+        if not isinstance(data, list):
+            return []
+        cleaned = []
+        for item in data:
+            dish = str(item.get('dish', '')).strip()
+            try:
+                cals = int(round(float(item.get('estimated_cals', 0))))
+            except Exception:
+                cals = 0
+            focus = str(item.get('focus', '')).strip() or 'Balanced'
+            if not dish:
+                continue
+            # Enforce calorie bounds softly
+            if cals < int(min_cals):
+                cals = int(min_cals)
+            if cals > int(max_cals):
+                cals = int(max_cals)
+            cleaned.append({
+                'dish': dish,
+                'estimated_cals': cals,
+                'focus': focus,
+                'meal_type': meal_type
+            })
+        return cleaned[:5]
+    except Exception:
+        return []
 
 def get_fitness_insight(user_id: str, mongo_client) -> str:
     """
@@ -238,7 +311,7 @@ def calculate_daily_calories(weight_kg: float, height_cm: float, age: int, gende
         }
     }
 
-def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calories: int, meal_type: str, food_preference: str) -> Dict[str, Any]:
+def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calories: int, meal_type: str, cuisine_preference: str) -> Dict[str, Any]:
     """
     Get calorie-based meal suggestions based on user's food history and calorie goals.
     Now includes agentic learning from user ratings.
@@ -248,7 +321,7 @@ def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calorie
         mongo_client: MongoDB client connection
         target_calories: Target calories for the meal
         meal_type: "breakfast", "lunch", "dinner", "snack"
-        food_preference: The user's preferred food type (e.g., "Protein", "Fiber")
+        cuisine_preference: The user's preferred cuisine type (e.g., "Indian", "Italian")
         
     Returns:
         Dictionary with meal suggestions and calorie information
@@ -258,59 +331,88 @@ def get_calorie_based_meal_suggestion(user_id: str, mongo_client, target_calorie
         food_collection = db["food_choices"]
         fitness_meals_collection = db["fitness_meals"]
         
-        # Get user's highly rated foods from general food choices
-        high_rated_foods = list(food_collection.find({
-            "user_id": user_id,
-            "rating": {"$gte": 7}
-        }).sort("rating", -1).limit(20))
-        
-        # Get user's fitness meal ratings to learn preferences
-        fitness_meal_history = list(fitness_meals_collection.find({
-            "user_id": user_id
-        }).sort("timestamp", -1).limit(50))
-        
-        # Get all food choices from the main app for personalization
-        food_choices_history = list(food_collection.find(
-            {"user_id": user_id}
-        ).sort("timestamp", -1))
-        
-        # Analyze user preferences from fitness meal ratings
+        # Get user history and learning
+        food_choices_history = list(food_collection.find({"user_id": user_id}).sort("timestamp", -1))
+        fitness_meal_history = list(fitness_meals_collection.find({"user_id": user_id}).sort("timestamp", -1).limit(50))
         user_preferences = analyze_fitness_meal_preferences(fitness_meal_history)
         
-        # Define meal-specific calorie ranges
+        # Calorie ranges per meal type
         meal_calorie_ranges = {
             "breakfast": (target_calories * 0.25, target_calories * 0.35),
             "lunch": (target_calories * 0.3, target_calories * 0.4),
             "dinner": (target_calories * 0.25, target_calories * 0.35),
             "snack": (target_calories * 0.1, target_calories * 0.15)
         }
-        
         min_cals, max_cals = meal_calorie_ranges.get(meal_type.lower(), (target_calories * 0.3, target_calories * 0.4))
         
-        # Generate personalized meal suggestions based on learned preferences
-        if fitness_meal_history:
-            # Use advanced personalization if user has rating history
-            meal_suggestions = get_personalized_meal_rotation(
-                user_id, mongo_client, meal_type, target_calories, food_preference, food_choices_history
-            )
-        else:
-            # Use basic personalization for new users
-            meal_suggestions = generate_personalized_fitness_meals(
-                meal_type, min_cals, max_cals, user_preferences, high_rated_foods
-            )
+        # Ask Gemini for candidates (no hardcoded menus)
+        candidates = generate_gemini_fitness_suggestions(user_id, mongo_client, meal_type, cuisine_preference, min_cals, max_cals, food_choices_history)
         
-        if not meal_suggestions:
-            # Fallback to default suggestions if no personalized ones
-            meal_suggestions = get_default_fitness_meals(meal_type, min_cals, max_cals)
+        if not candidates:
+            return {
+                "message": f"I couldn't generate {cuisine_preference} {meal_type} options right now. Try again or adjust cuisine.",
+                "target_range": f"{int(min_cals)}-{int(max_cals)} calories",
+                "suggestions": [],
+                "nutrition_tip": "Prefer whole foods, lean proteins, and complex carbs for sustained energy.",
+                "learning_insight": user_preferences.get('insight', "Your agent is learning your preferences!")
+            }
+        
+        # Filter/score against dislikes and history
+        rated_dishes = {item.get('food', '').lower() for item in food_choices_history}
+        disliked_dishes = {item.get('food', '').lower() for item in food_choices_history if item.get('rating', 0) <= 3}
+        
+        candidate_meals = [meal for meal in candidates if meal.get('dish', '').lower() not in disliked_dishes]
+        
+        scored_meals = []
+        for meal in candidate_meals:
+            # Ensure meal_type present for scoring
+            meal['meal_type'] = meal_type
+            score = calculate_meal_preference_score(meal, user_preferences, food_choices_history)
+            scored_meals.append((meal, score))
+        scored_meals.sort(key=lambda x: x[1], reverse=True)
+        
+        # Separate new vs past favorites
+        new_suggestions = []
+        past_favorites = []
+        for meal, score in scored_meals:
+            if any(item.get('food', '').lower() == meal.get('dish', '').lower() and item.get('rating', 0) >= 7 for item in food_choices_history):
+                past_favorites.append((meal, score))
+            else:
+                new_suggestions.append((meal, score))
+        
+        personalized_meals_with_scores = []
+        personalized_meals_with_scores.extend(new_suggestions)
+        personalized_meals_with_scores.extend(past_favorites[:max(0, 5 - len(new_suggestions))])
+        
+        personalized_meals = []
+        for meal, score in personalized_meals_with_scores:
+            personalization_message = "Personalized suggestion"
+            is_rated_before = any(item.get('food', '').lower() == meal.get('dish', '').lower() for item in food_choices_history)
+            if is_rated_before:
+                personalization_message = "This is a past favorite (You rated it highly before!)."
+            personalized_meals.append({
+                'dish': meal['dish'],
+                'estimated_cals': int(meal['estimated_cals']),
+                'focus': meal.get('focus', 'Balanced'),
+                'personalization': personalization_message
+            })
+        
+        if not personalized_meals:
+            return {
+                "message": "No new personalized suggestions found right now. Try different cuisine or meal type.",
+                "target_range": f"{int(min_cals)}-{int(max_cals)} calories",
+                "suggestions": [],
+                "nutrition_tip": "Prefer whole foods, lean proteins, and complex carbs for sustained energy.",
+                "learning_insight": user_preferences.get('insight', "Your agent is learning your preferences!")
+            }
         
         return {
-            "message": f"Here are {meal_type.title()} suggestions for your {target_calories} calorie goal:",
-            "target_range": f"{min_cals}-{max_cals} calories",
-            "suggestions": meal_suggestions,
+            "message": f"Here are {cuisine_preference.title() if cuisine_preference else 'Selected'} {meal_type.title()} suggestions for your {target_calories} calorie goal:",
+            "target_range": f"{int(min_cals)}-{int(max_cals)} calories",
+            "suggestions": personalized_meals,
             "nutrition_tip": "Focus on whole foods, lean proteins, and complex carbohydrates for sustained energy.",
             "learning_insight": user_preferences.get('insight', "Your agent is learning your preferences!")
         }
-        
     except Exception as e:
         return {
             "message": f"Unable to generate meal suggestions: {str(e)}",
@@ -379,7 +481,7 @@ def analyze_fitness_meal_preferences(fitness_meal_history: list) -> Dict[str, An
     }
 
 def generate_personalized_fitness_meals(meal_type: str, min_cals: int, max_cals: int, 
-                                      user_preferences: Dict[str, Any], high_rated_foods: list) -> list:
+                                      user_preferences: Dict[str, Any], high_rated_foods: list, cuisine_preference: str) -> list:
     """
     Generate personalized fitness meal suggestions based on user preferences.
     
@@ -389,12 +491,13 @@ def generate_personalized_fitness_meals(meal_type: str, min_cals: int, max_cals:
         max_cals: Maximum calories
         user_preferences: User's learned preferences
         high_rated_foods: User's highly rated foods
+        cuisine_preference: User's preferred cuisine
         
     Returns:
         List of personalized meal suggestions
     """
     # Base meal suggestions with calorie variations
-    base_meals = get_default_fitness_meals(meal_type, min_cals, max_cals)
+    base_meals = get_all_fitness_meals(meal_type, cuisine_preference)
     
     # Personalize based on user preferences
     personalized_meals = []
@@ -420,16 +523,18 @@ def generate_personalized_fitness_meals(meal_type: str, min_cals: int, max_cals:
     
     return personalized_meals
 
-def get_all_fitness_meals(meal_type: str) -> list:
+def get_all_fitness_meals(meal_type: str, cuisine_preference: str) -> list:
     """
-    Get all available fitness meal suggestions for a meal type.
+    Get all available fitness meal suggestions for a meal type and cuisine.
     
     Args:
         meal_type: Type of meal
+        cuisine_preference: User's preferred cuisine
         
     Returns:
         List of all available meal suggestions
     """
+    # This dictionary now contains a comprehensive list of meals, categorized by type and cuisine.
     meal_suggestions = {
         "breakfast": [
             {"dish": "Oatmeal with fruits and nuts", "estimated_cals": 300, "focus": "High fiber, moderate protein"},
@@ -471,16 +576,45 @@ def get_all_fitness_meals(meal_type: str) -> list:
             {"dish": "Smoothie with protein powder", "estimated_cals": 200, "focus": "High protein, quick energy"},
             {"dish": "Rice cakes with avocado", "estimated_cals": 170, "focus": "Light, healthy fats"}
         ],
-        "regional": [
+        "Indian": [
+            {"dish": "Dal Khichdi with a side of yogurt", "estimated_cals": 350, "focus": "Indian, Protein, Carbs, Light meal"},
+            {"dish": "Paneer Bhurji with whole wheat roti", "estimated_cals": 420, "focus": "Indian, Protein, Low carb"},
+            {"dish": "Palak Paneer Gravy with Jowar Roti", "estimated_cals": 450, "focus": "Indian, Protein, Fiber"},
+            {"dish": "Rajma Masala with Brown Rice", "estimated_cals": 480, "focus": "Indian, Protein, Fiber, Heavy meal"},
+            {"dish": "Moong Dal Cheela with green chutney", "estimated_cals": 300, "focus": "Indian, Protein, Light meal"}
+        ],
+        "South Indian": [
             {"dish": "Masala Dosa with Sambar", "estimated_cals": 450, "focus": "South Indian, balanced meal"},
-            {"dish": "Gujarati Thali with Dal and Roti", "estimated_cals": 500, "focus": "Gujarati, complex carbs"},
             {"dish": "Idli with Coconut Chutney", "estimated_cals": 250, "focus": "South Indian, light, easy to digest"},
+            {"dish": "Uttapam with Onion and Tomato", "estimated_cals": 300, "focus": "South Indian, Carbs"},
+            {"dish": "Rasam Rice with Aloo Poriyal", "estimated_cals": 400, "focus": "South Indian, Light meal"},
+            {"dish": "Lemon Rice with Sambar", "estimated_cals": 380, "focus": "South Indian, Carbs, Light meal"}
+        ],
+        "Gujarati": [
+            {"dish": "Gujarati Dal with Bajra Rotla", "estimated_cals": 400, "focus": "Gujarati, Fiber, Protein"},
+            {"dish": "Dhokla with spicy green chutney", "estimated_cals": 200, "focus": "Gujarati, light, steamed snack"},
             {"dish": "Thepla with a side of yogurt", "estimated_cals": 320, "focus": "Gujarati, high fiber, iron"},
-            {"dish": "Poha with peanuts and curry leaves", "estimated_cals": 280, "focus": "Indian, quick, healthy carbs"}
+            {"dish": "Handvo with mixed vegetables", "estimated_cals": 450, "focus": "Gujarati, Fermented, Protein"},
+            {"dish": "Khichu with oil and pickle", "estimated_cals": 350, "focus": "Gujarati, Light snack"}
+        ],
+        "Italian": [
+            {"dish": "Veggie and Mushroom Pasta with Tomato Sauce", "estimated_cals": 480, "focus": "Italian, Carbs, Comfort food"},
+            {"dish": "Minestrone Soup with whole grain bread", "estimated_cals": 300, "focus": "Italian, vegetables, light meal"},
+            {"dish": "Margherita Pizza on whole wheat crust", "estimated_cals": 550, "focus": "Italian, Cheat meal"},
+            {"dish": "Spinach and Ricotta Cannelloni", "estimated_cals": 520, "focus": "Italian, Protein, Comfort food"}
         ]
     }
     
-    return meal_suggestions.get(meal_type.lower(), meal_suggestions["lunch"])
+    all_meals = []
+    # If a specific cuisine is chosen, use only those meals
+    if cuisine_preference and cuisine_preference != "Any":
+        all_meals.extend(meal_suggestions.get(cuisine_preference.title(), []))
+    
+    # If no specific cuisine is selected, fall back to the generic meal type
+    if not all_meals and meal_type:
+        all_meals.extend(meal_suggestions.get(meal_type.lower(), []))
+    
+    return all_meals
 
 def get_default_fitness_meals(meal_type: str, min_cals: int, max_cals: int) -> list:
     """
@@ -494,6 +628,7 @@ def get_default_fitness_meals(meal_type: str, min_cals: int, max_cals: int) -> l
     Returns:
         List of default meal suggestions
     """
+    # Fallback to a broader range if specific cuisine/preference lists are empty
     meal_suggestions = {
         "breakfast": [
             {"dish": "Oatmeal with fruits and nuts", "estimated_cals": 300, "focus": "High fiber, moderate protein"},
@@ -745,7 +880,7 @@ def get_workout_recovery_meal(user_id: str, mongo_client) -> str:
             "user_id": user_id,
             "rating": {"$gte": 7},
             "category": "Protein is calling"
-        }).sort("rating", -1).limit(3))
+        }).sort("timestamp", -1).limit(3))
         
         if high_rated_protein:
             top_choice = high_rated_protein[0]
@@ -862,15 +997,17 @@ def calculate_meal_preference_score(meal: Dict[str, Any], user_preferences: Dict
     
     # Score based on regional similarity
     if "south indian" in focus or "south indian" in meal.get('dish', '').lower():
-        if "south indian" in food_choices_history:
+        # Check if the user's food history contains a high-rated South Indian dish
+        if any("south indian" in item.get('food', '').lower() and item.get('rating', 0) >= 7 for item in food_choices_history):
             score += 5.0
     if "gujarati" in focus or "gujarati" in meal.get('dish', '').lower():
-        if "gujarati" in food_choices_history:
+        # Check if the user's food history contains a high-rated Gujarati dish
+        if any("gujarati" in item.get('food', '').lower() and item.get('rating', 0) >= 7 for item in food_choices_history):
             score += 5.0
 
     return score
 
-def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, target_calories: int, food_preference: str, food_choices_history: list) -> list:
+def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, target_calories: int, cuisine_preference: str, food_choices_history: list) -> list:
     """
     Get personalized meal suggestions with rotation to avoid repetition.
     
@@ -879,7 +1016,7 @@ def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, t
         mongo_client: MongoDB client connection
         meal_type: Type of meal
         target_calories: Target calories
-        food_preference: The user's preferred food type (e.g., "Protein", "Fiber")
+        cuisine_preference: The user's preferred food type (e.g., "Protein", "Fiber")
         food_choices_history: User's general food rating history
         
     Returns:
@@ -887,69 +1024,99 @@ def get_personalized_meal_rotation(user_id: str, mongo_client, meal_type: str, t
     """
     try:
         # Get user preferences
-        fitness_meal_history = list(mongo_client["food_agent_db"]["fitness_meals"].find({
-            "user_id": user_id
-        }).sort("timestamp", -1).limit(50))
-        
+        fitness_meal_history = list(mongo_client["food_agent_db"]["fitness_meals"].find({"user_id": user_id}).sort("timestamp", -1).limit(50))
         user_preferences = analyze_fitness_meal_preferences(fitness_meal_history)
         
         # Get all available meals
-        all_meals = get_all_fitness_meals(meal_type)
+        all_meals = get_all_fitness_meals(meal_type, cuisine_preference)
         
-        # Filter by food preference.
-        if food_preference and food_preference != "Any":
-            keyword = food_preference.lower().replace(" ", "")
-            all_meals = [
-                meal for meal in all_meals
-                if keyword in meal.get('focus', '').lower().replace(" ", "") or
-                   keyword in meal.get('dish', '').lower().replace(" ", "")
-            ]
-
-        # If filtering removes all meals, fallback to original list
-        if not all_meals:
-            all_meals = get_all_fitness_meals(meal_type)
-        
-        # Calculate calorie range
+        # Filter meals based on calorie range
         min_cals = target_calories * 0.25
         max_cals = target_calories * 0.4
         
-        # Filter by calorie range
-        calorie_filtered = [
-            meal for meal in all_meals 
-            if min_cals <= meal['estimated_cals'] <= max_cals
-        ]
+        calorie_filtered = [meal for meal in all_meals if min_cals <= meal['estimated_cals'] <= max_cals]
         
-        # If not enough meals in range, expand slightly
+        # If not enough meals in the strict calorie range, expand it slightly
         if len(calorie_filtered) < 3:
             expanded_min = max(min_cals - 50, 0)
             expanded_max = max_cals + 50
-            calorie_filtered = [
-                meal for meal in all_meals 
-                if expanded_min <= meal['estimated_cals'] <= expanded_max
-            ]
-        
-        # Score and sort meals
-        scored_meals = []
+            calorie_filtered = [meal for meal in all_meals if expanded_min <= meal['estimated_cals'] <= expanded_max]
+            
+        # Get dishes the user has rated before to avoid suggesting low-rated ones
+        rated_dishes = {item.get('food', '').lower() for item in food_choices_history}
+        disliked_dishes = {item.get('food', '').lower() for item in food_choices_history if item.get('rating', 0) <= 3}
+
+        # Separate meals into new suggestions and past favorites
+        new_suggestions = []
+        past_favorites = []
+
         for meal in calorie_filtered:
+            dish_name = meal.get('dish', '').lower()
+            if dish_name in disliked_dishes:
+                continue # Skip disliked dishes entirely
+
+            if dish_name in rated_dishes:
+                # This is a past favorite, check if it was highly rated
+                if any(item.get('food', '').lower() == dish_name and item.get('rating', 0) >= 7 for item in food_choices_history):
+                    past_favorites.append(meal)
+            else:
+                # This is a new suggestion
+                new_suggestions.append(meal)
+
+        # Combine new suggestions and a few of the top past favorites, prioritizing new ones
+        final_suggestions_list = new_suggestions + past_favorites[:3]
+
+        # Score and sort the final list
+        scored_final_list = []
+        for meal in final_suggestions_list:
             score = calculate_meal_preference_score(meal, user_preferences, food_choices_history)
-            scored_meals.append((meal, score))
-        
-        # Sort by score and take top meals
-        scored_meals.sort(key=lambda x: x[1], reverse=True)
-        
-        # Return top 4-5 meals with personalization info
+            scored_final_list.append((meal, score))
+        scored_final_list.sort(key=lambda x: x[1], reverse=True)
+
         personalized_meals = []
-        for i, (meal, score) in enumerate(scored_meals[:5]):
+        
+        for meal, score in scored_final_list:
+            if meal.get('dish') in [s.get('dish') for s in personalized_meals]:
+                continue # Skip if already in the list
+            
+            personalization_message = "Personalized suggestion"
+            is_rated_before = any(item.get('dish', '').lower() == meal.get('dish', '').lower() for item in food_choices_history)
+            if is_rated_before:
+                 personalization_message = "This is a past favorite (You rated it highly before!)."
+
             personalized_meal = {
                 'dish': meal['dish'],
                 'estimated_cals': meal['estimated_cals'],
                 'focus': meal['focus'],
-                'personalization': f"Personalized suggestion #{i+1} (Score: {score:.1f})"
+                'personalization': personalization_message
             }
             personalized_meals.append(personalized_meal)
+            
+            if len(personalized_meals) >= 5:
+                break
         
+        # Fallback if no personalized meals are found
+        if not personalized_meals:
+            # Fallback to the top-scoring meal even if it's been rated before, but add a note
+            if scored_final_list:
+                top_meal, top_score = scored_final_list[0]
+                return [{
+                    'dish': top_meal['dish'],
+                    'estimated_cals': top_meal['estimated_cals'],
+                    'focus': top_meal['focus'],
+                    'personalization': "This is a past favorite, as no new suggestions were found. Try logging more diverse meals to help your agent learn!"
+                }]
+            else:
+                 return [{
+                    'dish': 'No personalized suggestions found.',
+                    'estimated_cals': 0,
+                    'focus': 'N/A',
+                    'personalization': 'Try logging more diverse meals to help your agent learn!'
+                }]
+
         return personalized_meals
         
     except Exception as e:
-        # Fallback to default meals
+        min_cals = target_calories * 0.25
+        max_cals = target_calories * 0.4
         return get_default_fitness_meals(meal_type, min_cals, max_cals)

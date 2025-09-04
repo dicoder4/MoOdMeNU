@@ -1,10 +1,13 @@
-# agentic_intelligence.py
-# Modular agentic intelligence features for the food app
-
 import streamlit as st
 from datetime import datetime, timedelta
 import time
 from typing import List, Dict, Optional, Tuple
+import google.generativeai as genai
+import ast
+import json
+from users import get_mongo_client
+from collections import defaultdict
+
 
 class FoodAgent:
     """Intelligent food agent that learns patterns and makes proactive suggestions"""
@@ -15,6 +18,7 @@ class FoodAgent:
         self.db = mongo_client["food_agent_db"]
         self.food_collection = self.db["food_choices"]
         self.period_collection = self.db["period_tracker"]
+        self.preferences_collection = self.db["user_preferences"]
         
     def get_user_patterns(self) -> Dict:
         """Analyze user's eating patterns and preferences"""
@@ -26,25 +30,39 @@ class FoodAgent:
                 return {"patterns": {}, "insights": []}
             
             patterns = {
-                "category_preferences": {},
+                "category_preferences": defaultdict(lambda: {"total": 0, "avg_rating": 0, "count": 0}),
                 "rating_patterns": {},
                 "time_patterns": {},
-                "cuisine_preferences": {},
+                "cuisine_preferences": defaultdict(lambda: {"total": 0, "avg_rating": 0, "count": 0}),
                 "recent_trends": []
             }
             
-            # Analyze category preferences
+            # Analyze category and cuisine preferences
             for item in history:
                 category = item.get('category', 'Unknown')
+                food = item.get('food', '')
                 rating = item.get('rating', 5)
                 
-                if category not in patterns["category_preferences"]:
-                    patterns["category_preferences"][category] = {"total": 0, "avg_rating": 0, "count": 0}
+                # Update category preferences
+                patterns["category_preferences"][category]["total"] += rating
+                patterns["category_preferences"][category]["count"] += 1
+                patterns["category_preferences"][category]["avg_rating"] = patterns["category_preferences"][category]["total"] / patterns["category_preferences"][category]["count"]
+
+                # Update cuisine preferences (assuming cuisine is in the food string)
+                if "(indian)" in food.lower():
+                    cuisine = "Indian"
+                elif "(south indian)" in food.lower():
+                    cuisine = "South Indian"
+                elif "(gujarati)" in food.lower():
+                    cuisine = "Gujarati"
+                else:
+                    cuisine = "Unknown"
                 
-                cat_data = patterns["category_preferences"][category]
-                cat_data["total"] += rating
-                cat_data["count"] += 1
-                cat_data["avg_rating"] = cat_data["total"] / cat_data["count"]
+                if cuisine != "Unknown":
+                    patterns["cuisine_preferences"][cuisine]["total"] += rating
+                    patterns["cuisine_preferences"][cuisine]["count"] += 1
+                    patterns["cuisine_preferences"][cuisine]["avg_rating"] = patterns["cuisine_preferences"][cuisine]["total"] / patterns["cuisine_preferences"][cuisine]["count"]
+
             
             # Analyze rating patterns
             high_rated = [item for item in history if item.get('rating', 0) >= 8]
@@ -251,7 +269,7 @@ class FoodAgent:
                 if patterns.get("category_preferences"):
                     # Suggest from user's best category
                     best_category = max(patterns["category_preferences"].items(), 
-                                      key=lambda x: x[1]["avg_rating"])
+                                  key=lambda x: x[1]["avg_rating"])
                     
                     if best_category[0] != category and best_category[1]["avg_rating"] >= 7:
                         recommendations.append({
@@ -358,3 +376,76 @@ def get_proactive_notification(user_id: str, mongo_client) -> Optional[Dict]:
         return None
     except:
         return None 
+    
+def save_user_preferences(user_id: str, mongo_client, preferences_text: str):
+    """Save unstructured user preferences to a new collection."""
+    try:
+        db = mongo_client["food_agent_db"]
+        preferences_collection = db["user_preferences"]
+        
+        preferences_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"preferences_text": preferences_text}},
+            upsert=True
+        )
+        return True
+    except Exception as e:
+        print(f"Error saving preferences: {e}")
+        return False
+        
+def get_user_preferences(user_id: str, mongo_client) -> str:
+    """Retrieve unstructured user preferences."""
+    try:
+        db = mongo_client["food_agent_db"]
+        preferences_collection = db["user_preferences"]
+        data = preferences_collection.find_one({"user_id": user_id})
+        return data.get("preferences_text", "") if data else ""
+    except Exception as e:
+        print(f"Error retrieving preferences: {e}")
+        return ""
+
+def process_conversational_input(user_id: str, mongo_client, chat_history: list) -> str:
+    """Process conversational input using Gemini and user data."""
+    try:
+        # Fetch user's history and preferences
+        db = mongo_client["food_agent_db"]
+        food_collection = db["food_choices"]
+        food_history = list(food_collection.find({"user_id": user_id}).sort("timestamp", -1).limit(10))
+        preferences_text = get_user_preferences(user_id, mongo_client)
+        
+        history_summary = "\n".join([f"- {item['food']} (Rating: {item['rating']}/10, Category: {item['category']})" for item in food_history])
+        
+        # Construct the full prompt
+        system_prompt = f"""
+        You are MoOdMeNU, a personal AI food agent. You are friendly, casual, and empathetic. Your goal is to help the user find food they'll love based on their mood, cravings, and past preferences.
+
+        **User's Personality:** The user is a picky eater who wants to discover new food, but also loves their comfort foods. They enjoy Indian and South Indian cuisines.
+        
+        **Knowledge Base:**
+        - User's recent food history:
+        {history_summary if history_summary else "No recent history available."}
+        - User's specific preferences:
+        {preferences_text if preferences_text else "No specific preferences have been saved yet."}
+        - The user is using an app to track food choices. You can offer to generate suggestions for them based on their food history.
+
+        **Instructions:**
+        1.  Analyze the user's message and the provided context.
+        2.  Respond in a helpful, concise, and friendly tone.
+        3.  Do not directly mention that you are a large language model or an AI. Refer to yourself as 'your agent' or 'MoOdMeNU'.
+        4.  If the user is asking for a food suggestion, generate a few ideas based on their history and preferences.
+        5.  Do not make up facts or recipes outside of what is reasonable for the context.
+        """
+        
+        model = genai.GenerativeModel('gemini-2.5-flash-preview-05-20')
+        
+        # Use chat history for multi-turn conversation
+        chat = model.start_chat(history=[])
+        for msg in chat_history:
+            chat.history.append(msg)
+            
+        response = chat.send_message(st.session_state.chat_history[-1]['parts'][0])
+        return response.text
+        
+    except Exception as e:
+        st.error(f"Error processing conversational input: {e}")
+        return "Sorry, I'm having trouble thinking right now. Please try again in a moment."
